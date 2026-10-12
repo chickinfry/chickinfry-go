@@ -4,6 +4,7 @@ package chik
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"strings"
 	"sync"
 	"time"
 )
@@ -150,7 +152,9 @@ func NewHTTPWithTimeout(origin string, timeout time.Duration) (*HTTP, error) {
 		return nil, errors.New("operation endpoint must be an HTTPS or loopback HTTP origin")
 	}
 	return &HTTP{
-		origin:    parsed.Scheme + "://" + parsed.Host,
+		// Serialize through url.URL so IPv6 zone identifiers keep their
+		// canonical percent encoding and the origin still round-trips.
+		origin:    (&url.URL{Scheme: parsed.Scheme, Host: parsed.Host}).String(),
 		refreshes: &refreshFlights{flights: map[string]*refreshFlight{}},
 		client: &http.Client{
 			Timeout:       timeout,
@@ -240,6 +244,73 @@ func isUnauthorized(err error) bool {
 	return ok && failure.Status == http.StatusUnauthorized
 }
 
+// transportError reports the failure class without the raw transport message,
+// which echoes server-controlled response bytes, the request URL, and proxy or
+// TLS details that callers must not log or display.
+type transportError struct {
+	cause error
+	class string
+}
+
+func (err *transportError) Error() string {
+	return "operation request failed: " + err.class
+}
+
+func (err *transportError) Unwrap() error { return err.cause }
+
+func newTransportError(cause error) error {
+	return &transportError{cause: cause, class: classifyTransportFailure(cause)}
+}
+
+func classifyTransportFailure(err error) string {
+	var netFailure net.Error
+	var verification *tls.CertificateVerificationError
+	var record tls.RecordHeaderError
+	switch {
+	case errors.Is(err, context.Canceled):
+		return "context canceled"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "deadline exceeded"
+	case errors.As(err, &netFailure) && netFailure.Timeout():
+		return "timeout"
+	case isConnectionRefused(err):
+		return "connection refused"
+	case errors.As(err, &verification) || errors.As(err, &record):
+		return "tls handshake failed"
+	case isMalformedResponse(err):
+		return "malformed HTTP response"
+	default:
+		return "network error"
+	}
+}
+
+// isMalformedResponse matches genuine response parse failures only: the
+// transport decorates those with the fixed connection-broken wrapper, and the
+// leaf carries the parser's own message shape. A bare leaf alone proves
+// nothing, because proxy CONNECT failures return the proxy's status text as
+// an unadorned error.
+func isMalformedResponse(err error) bool {
+	transportBroken := false
+	for {
+		if strings.HasPrefix(err.Error(), "net/http: HTTP/1.x transport connection broken: ") {
+			transportBroken = true
+		}
+		next := errors.Unwrap(err)
+		if next == nil {
+			break
+		}
+		err = next
+	}
+	if !transportBroken {
+		return false
+	}
+	message := err.Error()
+	return strings.HasPrefix(message, `malformed HTTP response "`) ||
+		strings.HasPrefix(message, `malformed HTTP status code "`) ||
+		strings.HasPrefix(message, `malformed HTTP version "`) ||
+		strings.HasPrefix(message, "malformed MIME header")
+}
+
 func (transport *HTTP) invokeOnce(ctx context.Context, operation string, input any, output any, bearer string) error {
 	if !operationName.MatchString(operation) {
 		return errors.New("invalid operation name")
@@ -253,7 +324,7 @@ func (transport *HTTP) invokeOnce(ctx context.Context, operation string, input a
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, transport.origin+"/"+operation, bytes.NewReader(body))
 	if err != nil {
-		return err
+		return newTransportError(err)
 	}
 	request.Header.Set("Content-Type", "application/json")
 	if bearer != "" {
@@ -261,7 +332,7 @@ func (transport *HTTP) invokeOnce(ctx context.Context, operation string, input a
 	}
 	response, err := transport.client.Do(request)
 	if err != nil {
-		return err
+		return newTransportError(err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode >= 300 && response.StatusCode < 400 {
