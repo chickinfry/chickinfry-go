@@ -83,6 +83,9 @@ func (flights *refreshFlights) Do(ctx context.Context, refreshToken string, run 
 	flights.mu.Lock()
 	if flight, ok := flights.flights[refreshToken]; ok {
 		flights.mu.Unlock()
+		if err := conformanceJoin(ctx, flight, false); err != nil {
+			return "", err
+		}
 		select {
 		case <-flight.done:
 			return flight.token, flight.err
@@ -92,6 +95,7 @@ func (flights *refreshFlights) Do(ctx context.Context, refreshToken string, run 
 	}
 	flight := &refreshFlight{done: make(chan struct{})}
 	flights.flights[refreshToken] = flight
+	conformanceFlightRegister(ctx, flight, refreshToken)
 	flights.mu.Unlock()
 	go func() {
 		defer func() {
@@ -101,9 +105,14 @@ func (flights *refreshFlights) Do(ctx context.Context, refreshToken string, run 
 			}
 			flights.mu.Lock()
 			delete(flights.flights, refreshToken)
+			conformanceFlightEnd(flight)
 			close(flight.done)
 			flights.mu.Unlock()
 		}()
+		if err := conformanceJoin(ctx, flight, true); err != nil {
+			flight.err = err
+			return
+		}
 		flight.token, flight.err = run()
 	}()
 	select {
@@ -197,6 +206,11 @@ var errorCode = regexp.MustCompile(`^[a-z_]+$`)
 
 // Invoke calls a single operation with POST and fills output from the response.
 func (transport *HTTP) Invoke(ctx context.Context, operation string, input any, output any) error {
+	ctx, finish, hookErr := conformanceBegin(ctx, transport.origin, transport.session != nil)
+	defer finish()
+	if hookErr != nil {
+		return hookErr
+	}
 	if transport.session == nil {
 		return transport.invokeOnce(ctx, operation, input, output, transport.bearer, nil)
 	}
@@ -208,6 +222,9 @@ func (transport *HTTP) Invoke(ctx context.Context, operation string, input any, 
 	err := transport.invokeOnce(ctx, operation, input, output, bearer, nil)
 	if operation == "auth.refresh" || !isInvalidToken(err) {
 		return err
+	}
+	if hookErr := conformanceBarrier(ctx, "both-originals-rejected", ""); hookErr != nil {
+		return hookErr
 	}
 	credentials, err = transport.refreshSession(ctx, credentials)
 	if err != nil {
@@ -263,7 +280,7 @@ func (transport *HTTP) refreshSession(ctx context.Context, failed SessionCredent
 		})
 		if err != nil {
 			if !unknownOutcome && isUnauthorized(err) {
-				if clearErr := transport.session.Clear(context.WithoutCancel(ctx), rejected); clearErr != nil {
+				if clearErr := conformanceClear(context.WithoutCancel(ctx), transport.session, rejected); clearErr != nil {
 					return "", errors.Join(err, clearErr)
 				}
 			}
@@ -361,7 +378,7 @@ func isMalformedResponse(err error) bool {
 		strings.HasPrefix(message, "malformed MIME header")
 }
 
-func (transport *HTTP) invokeOnce(ctx context.Context, operation string, input any, output any, bearer string, classified *bool) error {
+func (transport *HTTP) invokeOnce(ctx context.Context, operation string, input any, output any, bearer string, classified *bool) (result error) {
 	if !operationName.MatchString(operation) {
 		return errors.New("invalid operation name")
 	}
@@ -372,7 +389,9 @@ func (transport *HTTP) invokeOnce(ctx context.Context, operation string, input a
 	if len(body) > 4<<20 {
 		return errors.New("operation request is too large")
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, transport.origin+"/"+operation, bytes.NewReader(body))
+	requestCtx, client, finishRequest := conformanceRequest(ctx, transport.client, operation, len(body))
+	defer func() { finishRequest(result) }()
+	request, err := http.NewRequestWithContext(requestCtx, http.MethodPost, transport.origin+"/"+operation, bytes.NewReader(body))
 	if err != nil {
 		return newTransportError(err)
 	}
@@ -380,12 +399,14 @@ func (transport *HTTP) invokeOnce(ctx context.Context, operation string, input a
 	if bearer != "" {
 		request.Header.Set("Authorization", "Bearer "+bearer)
 	}
-	response, err := transport.client.Do(request)
+	response, err := conformanceDo(client, request)
 	if err != nil {
 		return newTransportError(err)
 	}
-	defer response.Body.Close()
+	conformanceHeaders(requestCtx, response)
+	defer func() { response.Body.Close(); conformanceReaderClosed(requestCtx) }()
 	if response.StatusCode >= 300 && response.StatusCode < 400 {
+		conformanceStop(requestCtx, false)
 		return &OperationError{Code: "redirect_not_allowed", Status: response.StatusCode}
 	}
 	data := make([]byte, 1<<20)
@@ -394,7 +415,11 @@ func (transport *HTTP) invokeOnce(ctx context.Context, operation string, input a
 		if size == len(data) {
 			var overflow [1]byte
 			n, err := io.ReadFull(response.Body, overflow[:])
+			if conformanceRead(requestCtx, n, size) {
+				return errors.New("operation response is too large")
+			}
 			if n != 0 {
+				conformanceStop(requestCtx, true)
 				return errors.New("operation response is too large")
 			}
 			if err != io.EOF {
@@ -404,6 +429,9 @@ func (transport *HTTP) invokeOnce(ctx context.Context, operation string, input a
 		}
 		n, err := response.Body.Read(data[size:])
 		size += n
+		if conformanceRead(requestCtx, n, size) {
+			return errors.New("operation response is too large")
+		}
 		if err != nil {
 			if err != io.EOF {
 				return errors.New("could not read operation response")
