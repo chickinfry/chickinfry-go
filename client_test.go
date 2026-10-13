@@ -2,8 +2,11 @@ package chik
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -13,6 +16,219 @@ import (
 	"testing"
 	"time"
 )
+
+func TestHTTPOriginLoopbackSpellings(t *testing.T) {
+	for _, test := range []struct {
+		origin string
+		accept bool
+	}{
+		{"http://127.0.0.1", true},
+		{"http://127.0.0.0", true},
+		{"http://127.255.255.255:8080/", true},
+		{"http://[::1]", true},
+		{"http://[::1]:8080/", true},
+		{"http://127.1", false},
+		{"http://127.0.1", false},
+		{"http://0x7f000001", false},
+		{"http://0x7f.0.0.1", false},
+		{"http://0177.0.0.1", false},
+		{"http://127.00.0.1", false},
+		{"http://127.0.0.01", false},
+		{"http://2130706433", false},
+		{"http://[::ffff:127.0.0.1]", false},
+		{"http://[::ffff:7f00:1]", false},
+		{"http://[0:0:0:0:0:0:0:1]", false},
+		{"http://[::0:1]", false},
+		{"http://[::1%25lo0]", false},
+		{"http://::1", false},
+		{"http://localhost", false},
+		{"http://128.0.0.1", false},
+		{"http://126.255.255.255", false},
+		{"https://localhost", true},
+		{"https://[::ffff:127.0.0.1]", true},
+		{"https://[0:0:0:0:0:0:0:1]", true},
+		{"https://[::1%25lo0]", true},
+		{"https://example.com/", true},
+		{"https://user@example.com", false},
+		{"https://example.com/path", false},
+		{"https://example.com?query=value", false},
+		{"https://example.com#fragment", false},
+		{"https://example.test?", false},
+		{"https://example.test#", false},
+		{"https://example.test/?", false},
+		{"https://example.test/#", false},
+		{"http://127.0.0.1?", false},
+		{"http://[::1]#", false},
+		{"https://example.test/", true},
+	} {
+		t.Run(test.origin, func(t *testing.T) {
+			_, err := NewHTTP(test.origin)
+			if (err == nil) != test.accept {
+				t.Fatalf("origin acceptance = %t, want %t: %v", err == nil, test.accept, err)
+			}
+		})
+	}
+}
+
+func TestHTTPClassifiesInvalidErrorResponses(t *testing.T) {
+	for _, test := range []struct {
+		body string
+		code string
+	}{
+		{"not JSON", "invalid_response"},
+		{"{}", "invalid_response"},
+		{`{"message":"failure"}`, "invalid_response"},
+		{`{"error":"Bad-code1"}`, "invalid_response"},
+		{`{"error":null}`, "invalid_response"},
+		{`{"error":42}`, "invalid_response"},
+		{`{"error":"invalid_token"}`, "invalid_token"},
+		{`{"error":"operation_failed"}`, "operation_failed"},
+	} {
+		t.Run(test.body, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+				response.WriteHeader(http.StatusBadGateway)
+				fmt.Fprint(response, test.body)
+			}))
+			defer server.Close()
+			transport, err := NewHTTP(server.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = transport.Invoke(t.Context(), "catalog.create", map[string]string{}, &struct{}{})
+			failure, ok := errors.AsType[*OperationError](err)
+			if !ok || failure.Code != test.code || failure.Status != http.StatusBadGateway {
+				t.Fatalf("response classification = %v, want %s / 502", err, test.code)
+			}
+		})
+	}
+}
+
+func TestHTTPUnknownRefreshOutcomeBlocksReuseAcrossTransports(t *testing.T) {
+	type refreshOutcome struct {
+		name       string
+		status     int
+		body, code string
+	}
+	outcomes := []refreshOutcome{
+		{name: "connection closed"}, {name: "timeout"}, {name: "unreadable body"},
+		{name: "unreadable 401"}, {name: "invalid JSON"}, {name: "invalid credentials"},
+		{"non-JSON 401", 401, "not JSON", "invalid_response"},
+		{"missing error 401", 401, "{}", "invalid_response"},
+		{"invalid code 401", 401, `{"error":"Bad-code"}`, "invalid_response"},
+	}
+	for _, status := range []int{400, 403, 429, 500} {
+		outcomes = append(outcomes,
+			refreshOutcome{fmt.Sprintf("valid envelope %d", status), status, `{"error":"refresh_failed"}`, "refresh_failed"},
+			refreshOutcome{fmt.Sprintf("malformed envelope %d", status), status, "{}", "invalid_response"},
+		)
+	}
+	for _, outcome := range outcomes {
+		t.Run(outcome.name, func(t *testing.T) {
+			store := newRefreshStore()
+			var refreshToken [32]byte
+			rand.Read(refreshToken[:])
+			store.credentials.RefreshToken = base64.RawURLEncoding.EncodeToString(refreshToken[:])
+			original := store.Credentials()
+			var refreshes atomic.Int64
+			releaseTimeout := make(chan struct{})
+			server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+				if request.URL.Path != "/auth.refresh" {
+					if request.Header.Get("Authorization") == "Bearer "+strings.Repeat("c", 43) {
+						writeRefreshResponse(t, response, http.StatusOK, map[string]string{})
+					} else {
+						writeRefreshResponse(t, response, http.StatusUnauthorized, map[string]string{"error": "invalid_token"})
+					}
+					return
+				}
+				if refreshes.Add(1) != 1 {
+					writeRefreshResponse(t, response, http.StatusOK, map[string]string{
+						"access_token": strings.Repeat("c", 43), "refresh_token": strings.Repeat("d", 43),
+						"expires_at": "2099-01-01T00:00:00Z", "refresh_expires_at": "2099-01-02T00:00:00Z",
+						"user_id": "user", "session_id": "session",
+					})
+					return
+				}
+				switch outcome.name {
+				case "connection closed", "unreadable body", "unreadable 401":
+					connection, _, err := response.(http.Hijacker).Hijack()
+					if err != nil {
+						t.Errorf("hijack refresh response: %v", err)
+						return
+					}
+					if outcome.name == "unreadable body" {
+						fmt.Fprint(connection, "HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n{")
+					}
+					if outcome.name == "unreadable 401" {
+						fmt.Fprint(connection, "HTTP/1.1 401 Unauthorized\r\nContent-Length: 100\r\n\r\n{")
+					}
+					connection.Close()
+				case "timeout":
+					<-releaseTimeout
+				case "invalid JSON":
+					fmt.Fprint(response, "not JSON")
+				case "invalid credentials":
+					writeRefreshResponse(t, response, http.StatusOK, map[string]string{})
+				default:
+					response.WriteHeader(outcome.status)
+					fmt.Fprint(response, outcome.body)
+				}
+			}))
+			defer server.Close()
+			defer close(releaseTimeout)
+			timeout := 30 * time.Second
+			if outcome.name == "timeout" {
+				timeout = 50 * time.Millisecond
+			}
+			transport, err := NewHTTPWithTimeout(server.URL, timeout)
+			if err != nil {
+				t.Fatal(err)
+			}
+			signed, err := transport.WithSession(store)
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = signed.Invoke(t.Context(), "catalog.create", map[string]string{}, &struct{}{})
+			if err == nil {
+				t.Fatal("unknown refresh outcome succeeded")
+			}
+			if outcome.status != 0 {
+				failure, ok := errors.AsType[*OperationError](err)
+				if !ok || failure.Status != outcome.status || failure.Code != outcome.code {
+					t.Fatalf("refresh error = %v, want %s / %d", err, outcome.code, outcome.status)
+				}
+			}
+			secondTransport, err := NewHTTP(server.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			secondSigned, err := secondTransport.WithSession(store)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, client := range []*HTTP{signed, secondSigned} {
+				err := client.Invoke(t.Context(), "catalog.create", map[string]string{}, &struct{}{})
+				failure, ok := errors.AsType[*OperationError](err)
+				if !ok || failure.Code != "invalid_token" || failure.Status != http.StatusUnauthorized {
+					t.Fatalf("blocked refresh = %v, want invalid_token / 401", err)
+				}
+			}
+			if refreshes.Load() != 1 || store.Credentials() != original || store.Cleared() {
+				t.Fatalf("unknown outcome reused refresh or changed session: refreshes=%d cleared=%t", refreshes.Load(), store.Cleared())
+			}
+			store.mu.Lock()
+			store.credentials.AccessToken = strings.Repeat("l", 43)
+			rand.Read(refreshToken[:])
+			store.credentials.RefreshToken = base64.RawURLEncoding.EncodeToString(refreshToken[:])
+			store.mu.Unlock()
+			if err := secondSigned.Invoke(t.Context(), "catalog.create", map[string]string{}, &struct{}{}); err != nil {
+				t.Fatalf("new login did not refresh normally: %v", err)
+			}
+			if refreshes.Load() != 2 || store.Credentials().AccessToken != strings.Repeat("c", 43) || store.Cleared() {
+				t.Fatal("new login refresh was not saved")
+			}
+		})
+	}
+}
 
 func TestHTTPRefreshesOnceAndRetriesOnce(t *testing.T) {
 	store := newRefreshStore()
@@ -91,19 +307,21 @@ func TestHTTPRefreshesOnceAndRetriesOnce(t *testing.T) {
 	}
 }
 
-func TestHTTPRefreshFailureEndsSessionWithoutRetryLoop(t *testing.T) {
+func TestHTTPDoesNotRefreshAgainWhenRetryIsRejected(t *testing.T) {
 	store := newRefreshStore()
-	var operations atomic.Int64
+	rotated := newRefreshStore().Credentials()
+	rotated.AccessToken = strings.Repeat("c", 43)
+	var refreshes, requests atomic.Int64
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
-		operations.Add(1)
 		if request.URL.Path == "/auth.refresh" {
-			writeRefreshResponse(t, response, http.StatusUnauthorized, map[string]string{"error": "invalid_token"})
+			refreshes.Add(1)
+			writeSessionCredentials(t, response, rotated)
 			return
 		}
+		requests.Add(1)
 		writeRefreshResponse(t, response, http.StatusUnauthorized, map[string]string{"error": "invalid_token"})
 	}))
 	defer server.Close()
-
 	transport, err := NewHTTP(server.URL)
 	if err != nil {
 		t.Fatal(err)
@@ -113,8 +331,34 @@ func TestHTTPRefreshFailureEndsSessionWithoutRetryLoop(t *testing.T) {
 		t.Fatal(err)
 	}
 	err = signed.Invoke(t.Context(), "catalog.create", map[string]string{}, &struct{}{})
-	var failure *OperationError
-	if !errors.As(err, &failure) || failure.Status != http.StatusUnauthorized || failure.Code != "invalid_token" {
+	failure, ok := errors.AsType[*OperationError](err)
+	if !ok || failure.Code != "invalid_token" || failure.Status != http.StatusUnauthorized {
+		t.Fatalf("retry rejection = %v, want invalid_token / 401", err)
+	}
+	if refreshes.Load() != 1 || requests.Load() != 2 {
+		t.Fatalf("refreshes=%d requests=%d, want 1 refresh and 2 original requests", refreshes.Load(), requests.Load())
+	}
+}
+
+func TestHTTPRefreshFailureEndsSessionWithoutRetryLoop(t *testing.T) {
+	store := newRefreshStore()
+	var operations atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		operations.Add(1)
+		writeRefreshResponse(t, response, http.StatusUnauthorized, map[string]string{"error": "invalid_token"})
+	}))
+	defer server.Close()
+	transport, err := NewHTTP(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signed, err := transport.WithSession(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = signed.Invoke(t.Context(), "catalog.create", map[string]string{}, &struct{}{})
+	failure, ok := errors.AsType[*OperationError](err)
+	if !ok || failure.Status != http.StatusUnauthorized || failure.Code != "invalid_token" {
 		t.Fatalf("refresh failure was not returned: %v", err)
 	}
 	if operations.Load() != 2 {
@@ -300,8 +544,10 @@ type refreshStore struct {
 }
 
 func newRefreshStore() *refreshStore {
+	var refreshToken [32]byte
+	rand.Read(refreshToken[:])
 	return &refreshStore{credentials: SessionCredentials{
-		AccessToken: strings.Repeat("a", 43), RefreshToken: strings.Repeat("b", 43),
+		AccessToken: strings.Repeat("a", 43), RefreshToken: base64.RawURLEncoding.EncodeToString(refreshToken[:]),
 		ExpiresAt: "2099-01-01T00:00:00Z", RefreshExpiresAt: "2099-01-02T00:00:00Z",
 		UserID: "user", SessionID: "session",
 	}}
@@ -353,5 +599,457 @@ func writeRefreshResponse(t *testing.T, response http.ResponseWriter, status int
 	response.WriteHeader(status)
 	if err := json.NewEncoder(response).Encode(value); err != nil {
 		t.Errorf("write response: %v", err)
+	}
+}
+
+type failingRefreshStore struct {
+	*refreshStore
+	mode   string
+	failed bool
+}
+
+func (store *failingRefreshStore) Refresh(ctx context.Context, operation func(context.Context, SessionCredentials) (SessionCredentials, error)) (credentials SessionCredentials, err error) {
+	if store.failed || store.mode == "clear panic" {
+		return store.refreshStore.Refresh(ctx, operation)
+	}
+	store.failed = true
+	if store.mode == "recovered save panic" {
+		defer func() {
+			if recover() != nil {
+				err = errors.New("could not save session")
+			}
+		}()
+	}
+	if store.mode == "refresh panic" {
+		panic("fixture secret in Refresh")
+	}
+	credentials, err = operation(ctx, store.Credentials())
+	if err != nil {
+		return SessionCredentials{}, err
+	}
+	if store.mode == "save failure" {
+		return SessionCredentials{}, errors.New("could not save session")
+	}
+	panic("fixture secret while saving")
+}
+
+func (store *failingRefreshStore) Clear(ctx context.Context, expected SessionCredentials) error {
+	if store.mode == "clear panic" {
+		panic("fixture secret in Clear")
+	}
+	return store.refreshStore.Clear(ctx, expected)
+}
+
+func writeSessionCredentials(t *testing.T, response http.ResponseWriter, credentials SessionCredentials) {
+	t.Helper()
+	writeRefreshResponse(t, response, http.StatusOK, map[string]string{
+		"access_token": credentials.AccessToken, "refresh_token": credentials.RefreshToken,
+		"expires_at": credentials.ExpiresAt, "refresh_expires_at": credentials.RefreshExpiresAt,
+		"user_id": credentials.UserID, "session_id": credentials.SessionID,
+	})
+}
+
+func TestHTTPRefreshStoreFailuresKeepTokenBlocked(t *testing.T) {
+	for _, mode := range []string{"save failure", "recovered save panic", "save panic", "refresh panic", "clear panic"} {
+		t.Run(mode, func(t *testing.T) {
+			store := &failingRefreshStore{refreshStore: newRefreshStore(), mode: mode}
+			original := store.Credentials()
+			rotated := newRefreshStore().Credentials()
+			var refreshes atomic.Int64
+			server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+				if request.URL.Path != "/auth.refresh" {
+					writeRefreshResponse(t, response, http.StatusUnauthorized, map[string]string{"error": "invalid_token"})
+					return
+				}
+				refreshes.Add(1)
+				if mode == "clear panic" {
+					writeRefreshResponse(t, response, http.StatusUnauthorized, map[string]string{"error": "invalid_token"})
+					return
+				}
+				writeSessionCredentials(t, response, rotated)
+			}))
+			defer server.Close()
+			transport, err := NewHTTP(server.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			signed, err := transport.WithSession(store)
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = signed.Invoke(t.Context(), "catalog.create", map[string]string{}, &struct{}{})
+			want := "session refresh failed; sign in again"
+			if mode == "save failure" || mode == "recovered save panic" {
+				want = "could not save session"
+			}
+			if err == nil || err.Error() != want {
+				t.Fatalf("store failure = %v, want %s", err, want)
+			}
+			secondTransport, err := NewHTTP(server.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			secondSigned, err := secondTransport.WithSession(store)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, client := range []*HTTP{signed, secondSigned} {
+				err := client.Invoke(t.Context(), "catalog.create", map[string]string{}, &struct{}{})
+				failure, ok := errors.AsType[*OperationError](err)
+				if !ok || failure.Code != "invalid_token" || failure.Status != 401 {
+					t.Fatalf("blocked token failure = %v", err)
+				}
+			}
+			wantRefreshes := int64(1)
+			if mode == "refresh panic" {
+				wantRefreshes = 0
+			}
+			if refreshes.Load() != wantRefreshes || store.Credentials() != original || store.Cleared() {
+				t.Fatalf("old token reused or credentials changed: refreshes=%d", refreshes.Load())
+			}
+			signed.refreshes.mu.Lock()
+			remaining := len(signed.refreshes.flights)
+			signed.refreshes.mu.Unlock()
+			if remaining != 0 {
+				t.Fatal("failed refresh flight was not removed")
+			}
+		})
+	}
+}
+
+type cachedRefreshStore struct {
+	*refreshStore
+	unit    *refreshStore
+	entered chan struct{}
+}
+
+func (store *cachedRefreshStore) Refresh(ctx context.Context, operation func(context.Context, SessionCredentials) (SessionCredentials, error)) (SessionCredentials, error) {
+	if store.entered != nil {
+		close(store.entered)
+	}
+	store.unit.refreshMu.Lock()
+	defer store.unit.refreshMu.Unlock()
+	latest := store.unit.Credentials()
+	refreshed, err := operation(ctx, latest)
+	if err != nil {
+		return SessionCredentials{}, err
+	}
+	store.unit.mu.Lock()
+	store.unit.credentials = refreshed
+	store.unit.mu.Unlock()
+	store.mu.Lock()
+	store.credentials = refreshed
+	store.mu.Unlock()
+	return refreshed, nil
+}
+
+func TestHTTPRefreshSynchronizesDistinctStoreCaches(t *testing.T) {
+	unit := newRefreshStore()
+	firstStore := &cachedRefreshStore{refreshStore: &refreshStore{credentials: unit.Credentials()}, unit: unit}
+	secondStore := &cachedRefreshStore{refreshStore: &refreshStore{credentials: unit.Credentials()}, unit: unit, entered: make(chan struct{})}
+	rotated := newRefreshStore().Credentials()
+	rotated.AccessToken = strings.Repeat("c", 43)
+	var refreshes atomic.Int64
+	started := make(chan struct{})
+	release := make(chan struct{})
+	unblock := sync.OnceFunc(func() { close(release) })
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/auth.refresh" {
+			if refreshes.Add(1) == 1 {
+				close(started)
+			}
+			<-release
+			writeSessionCredentials(t, response, rotated)
+			return
+		}
+		if request.Header.Get("Authorization") == "Bearer "+rotated.AccessToken {
+			writeRefreshResponse(t, response, http.StatusOK, map[string]string{})
+		} else {
+			writeRefreshResponse(t, response, http.StatusUnauthorized, map[string]string{"error": "invalid_token"})
+		}
+	}))
+	defer server.Close()
+	defer unblock()
+	transport, err := NewHTTP(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := transport.WithSession(firstStore)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := transport.WithSession(secondStore)
+	if err != nil {
+		t.Fatal(err)
+	}
+	results := make(chan error, 2)
+	go func() { results <- first.Invoke(t.Context(), "catalog.create", map[string]string{}, &struct{}{}) }()
+	<-started
+	go func() { results <- second.Invoke(t.Context(), "catalog.create", map[string]string{}, &struct{}{}) }()
+	select {
+	case <-secondStore.entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("second store never entered its synchronization path")
+	}
+	unblock()
+	for range 2 {
+		if err := <-results; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if refreshes.Load() != 1 || firstStore.Credentials() != rotated || secondStore.Credentials() != rotated {
+		t.Fatalf("stores did not independently observe rotated credentials: refreshes=%d", refreshes.Load())
+	}
+}
+
+func TestHTTPRefreshOverlapDoesNotClearOrBlockNewLogin(t *testing.T) {
+	for _, knownRejection := range []bool{false, true} {
+		t.Run(fmt.Sprintf("known rejection=%t", knownRejection), func(t *testing.T) {
+			store := newRefreshStore()
+			login := newRefreshStore().Credentials()
+			login.AccessToken = strings.Repeat("l", 43)
+			rotated := newRefreshStore().Credentials()
+			rotated.AccessToken = strings.Repeat("c", 43)
+			var refreshes atomic.Int64
+			started := make(chan struct{})
+			release := make(chan struct{})
+			unblock := sync.OnceFunc(func() { close(release) })
+			server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+				if request.URL.Path == "/auth.refresh" {
+					if refreshes.Add(1) == 1 {
+						close(started)
+						<-release
+						if knownRejection {
+							writeRefreshResponse(t, response, http.StatusUnauthorized, map[string]string{"error": "invalid_token"})
+						} else {
+							response.WriteHeader(http.StatusBadGateway)
+							fmt.Fprint(response, "not JSON")
+						}
+					} else {
+						writeSessionCredentials(t, response, rotated)
+					}
+					return
+				}
+				if request.Header.Get("Authorization") == "Bearer "+rotated.AccessToken {
+					writeRefreshResponse(t, response, http.StatusOK, map[string]string{})
+				} else {
+					writeRefreshResponse(t, response, http.StatusUnauthorized, map[string]string{"error": "invalid_token"})
+				}
+			}))
+			defer server.Close()
+			defer unblock()
+			transport, err := NewHTTP(server.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			signed, err := transport.WithSession(store)
+			if err != nil {
+				t.Fatal(err)
+			}
+			result := make(chan error, 1)
+			go func() { result <- signed.Invoke(t.Context(), "catalog.create", map[string]string{}, &struct{}{}) }()
+			<-started
+			store.mu.Lock()
+			store.credentials = login
+			store.mu.Unlock()
+			unblock()
+			if err := <-result; err == nil {
+				t.Fatal("old refresh unexpectedly succeeded")
+			}
+			if store.Credentials() != login || store.Cleared() {
+				t.Fatal("stale refresh cleared or replaced new login")
+			}
+			if err := signed.Invoke(t.Context(), "catalog.create", map[string]string{}, &struct{}{}); err != nil {
+				t.Fatalf("new login was blocked: %v", err)
+			}
+			if refreshes.Load() != 2 || store.Credentials() != rotated {
+				t.Fatal("new login did not refresh normally")
+			}
+		})
+	}
+}
+
+type refreshWaitContext struct {
+	context.Context
+	waiting chan struct{}
+	once    sync.Once
+}
+
+func (ctx *refreshWaitContext) Done() <-chan struct{} {
+	ctx.once.Do(func() { close(ctx.waiting) })
+	return ctx.Context.Done()
+}
+
+func TestHTTPRefreshCancellationDoesNotCancelSharedWork(t *testing.T) {
+	store := newRefreshStore()
+	original := store.Credentials()
+	rotated := newRefreshStore().Credentials()
+	rotated.AccessToken = strings.Repeat("c", 43)
+	var refreshes atomic.Int64
+	started := make(chan struct{})
+	release := make(chan struct{})
+	unblock := sync.OnceFunc(func() { close(release) })
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/auth.refresh" {
+			if refreshes.Add(1) == 1 {
+				close(started)
+			}
+			<-release
+			if request.Context().Err() != nil {
+				t.Error("waiter cancellation canceled refresh")
+			}
+			writeSessionCredentials(t, response, rotated)
+			return
+		}
+		writeRefreshResponse(t, response, http.StatusOK, map[string]string{})
+	}))
+	defer server.Close()
+	defer unblock()
+	transport, err := NewHTTP(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signed, err := transport.WithSession(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaderCtx, cancelLeader := context.WithCancel(t.Context())
+	defer cancelLeader()
+	leader := make(chan error, 1)
+	go func() { _, err := signed.refreshSession(leaderCtx, original); leader <- err }()
+	<-started
+	followerCtx, cancelFollower := context.WithCancel(t.Context())
+	defer cancelFollower()
+	followerWait := &refreshWaitContext{Context: followerCtx, waiting: make(chan struct{})}
+	follower := make(chan error, 1)
+	go func() { _, err := signed.refreshSession(followerWait, original); follower <- err }()
+	<-followerWait.waiting
+	cancelLeader()
+	cancelFollower()
+	if err := <-leader; !errors.Is(err, context.Canceled) {
+		t.Fatalf("leader cancellation = %v", err)
+	}
+	if err := <-follower; !errors.Is(err, context.Canceled) {
+		t.Fatalf("follower cancellation = %v", err)
+	}
+	lastWait := &refreshWaitContext{Context: t.Context(), waiting: make(chan struct{})}
+	last := make(chan error, 1)
+	go func() { _, err := signed.refreshSession(lastWait, original); last <- err }()
+	<-lastWait.waiting
+	unblock()
+	if err := <-last; err != nil {
+		t.Fatal(err)
+	}
+	if refreshes.Load() != 1 || store.Credentials() != rotated {
+		t.Fatal("cancellation abandoned or repeated the shared refresh")
+	}
+}
+
+func TestRefreshFlightPanicNotifiesWaiters(t *testing.T) {
+	flights := &refreshFlights{flights: map[string]*refreshFlight{}}
+	token := newRefreshStore().Credentials().RefreshToken
+	started := make(chan struct{})
+	release := make(chan struct{})
+	results := make(chan error, 2)
+	go func() {
+		_, err := flights.Do(t.Context(), token, func() (string, error) { close(started); <-release; panic("fixture secret") })
+		results <- err
+	}()
+	<-started
+	ctx := &refreshWaitContext{Context: t.Context(), waiting: make(chan struct{})}
+	go func() {
+		_, err := flights.Do(ctx, token, func() (string, error) { return "", errors.New("unexpected second flight") })
+		results <- err
+	}()
+	<-ctx.waiting
+	close(release)
+	for range 2 {
+		if err := <-results; err == nil || err.Error() != "session refresh failed; sign in again" {
+			t.Fatalf("panic waiter result = %v", err)
+		}
+	}
+	flights.mu.Lock()
+	remaining := len(flights.flights)
+	flights.mu.Unlock()
+	if remaining != 0 {
+		t.Fatal("panic left a stuck flight")
+	}
+}
+
+type concurrentRefreshStore struct {
+	*refreshStore
+	calls atomic.Int64
+}
+
+func (store *concurrentRefreshStore) Refresh(ctx context.Context, operation func(context.Context, SessionCredentials) (SessionCredentials, error)) (SessionCredentials, error) {
+	store.calls.Add(1)
+	refreshed, err := operation(ctx, store.Credentials())
+	if err != nil {
+		return SessionCredentials{}, err
+	}
+	store.mu.Lock()
+	store.credentials = refreshed
+	store.mu.Unlock()
+	return refreshed, nil
+}
+
+func TestHTTPRefreshJoinsWithoutStoreSerialization(t *testing.T) {
+	store := &concurrentRefreshStore{refreshStore: newRefreshStore()}
+	original := store.Credentials()
+	rotated := newRefreshStore().Credentials()
+	rotated.AccessToken = strings.Repeat("c", 43)
+	var refreshes atomic.Int64
+	started := make(chan struct{})
+	release := make(chan struct{})
+	unblock := sync.OnceFunc(func() { close(release) })
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/auth.refresh" {
+			if refreshes.Add(1) == 1 {
+				close(started)
+			}
+			<-release
+			writeSessionCredentials(t, response, rotated)
+			return
+		}
+		if request.Header.Get("Authorization") == "Bearer "+rotated.AccessToken {
+			writeRefreshResponse(t, response, http.StatusOK, map[string]string{})
+		} else {
+			writeRefreshResponse(t, response, http.StatusUnauthorized, map[string]string{"error": "invalid_token"})
+		}
+	}))
+	defer server.Close()
+	defer unblock()
+	transport, err := NewHTTP(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signed, err := transport.WithSession(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	results := make(chan error, 2)
+	go func() { results <- signed.Invoke(t.Context(), "catalog.create", map[string]string{}, &struct{}{}) }()
+	<-started
+	waitCtx := &refreshWaitContext{Context: t.Context(), waiting: make(chan struct{})}
+	go func() {
+		_, err := signed.refreshSession(waitCtx, original)
+		if err == nil {
+			err = signed.Invoke(t.Context(), "catalog.create", map[string]string{}, &struct{}{})
+		}
+		results <- err
+	}()
+	select {
+	case <-waitCtx.waiting:
+	case <-time.After(3 * time.Second):
+		t.Fatal("follower did not enter the SDK flight wait")
+	}
+	unblock()
+	for range 2 {
+		if err := <-results; err != nil {
+			t.Fatalf("concurrent business request failed: %v", err)
+		}
+	}
+	if refreshes.Load() != 1 || store.calls.Load() != 1 || store.Credentials() != rotated {
+		t.Fatalf("SDK join failed: refreshes=%d store calls=%d", refreshes.Load(), store.calls.Load())
 	}
 }

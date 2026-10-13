@@ -4,6 +4,7 @@ package chik
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
@@ -11,6 +12,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"regexp"
 	"strings"
@@ -49,6 +51,8 @@ type SessionCredentials struct {
 }
 
 // SessionStore defines reading, saving, and ending session credentials owned by the caller.
+// Refresh must serialize on the shared session unit, read its latest credentials,
+// and persist successful results before returning. Clear must match expected credentials.
 type SessionStore interface {
 	Credentials() SessionCredentials
 	Refresh(ctx context.Context, operation func(context.Context, SessionCredentials) (SessionCredentials, error)) (SessionCredentials, error)
@@ -65,6 +69,10 @@ type refreshFlights struct {
 	mu      sync.Mutex
 	flights map[string]*refreshFlight
 }
+
+// ponytail: retain one fingerprint per unknown refresh token for the process
+// lifetime (O(unknown tokens)); use durable store state if restart recovery is needed.
+var unknownRefreshes sync.Map
 
 var tokenPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{43}$`)
 
@@ -86,11 +94,17 @@ func (flights *refreshFlights) Do(ctx context.Context, refreshToken string, run 
 	flights.flights[refreshToken] = flight
 	flights.mu.Unlock()
 	go func() {
+		defer func() {
+			if recover() != nil {
+				unknownRefreshes.Store(sha256.Sum256([]byte(refreshToken)), struct{}{})
+				flight.err = errors.New("session refresh failed; sign in again")
+			}
+			flights.mu.Lock()
+			delete(flights.flights, refreshToken)
+			close(flight.done)
+			flights.mu.Unlock()
+		}()
 		flight.token, flight.err = run()
-		close(flight.done)
-		flights.mu.Lock()
-		delete(flights.flights, refreshToken)
-		flights.mu.Unlock()
 	}()
 	select {
 	case <-flight.done:
@@ -128,6 +142,8 @@ func (transport *HTTP) WithSession(store SessionStore) (*HTTP, error) {
 		return nil, err
 	}
 	signed.session = store
+	// Each store binding must enter its own Refresh path to synchronize cached credentials.
+	signed.refreshes = &refreshFlights{flights: map[string]*refreshFlight{}}
 	return signed, nil
 }
 
@@ -145,10 +161,13 @@ func NewHTTPWithTimeout(origin string, timeout time.Duration) (*HTTP, error) {
 	if err != nil || parsed.Hostname() == "" {
 		return nil, errors.New("invalid operation endpoint")
 	}
-	ip := net.ParseIP(parsed.Hostname())
-	secure := parsed.Scheme == "https" || (parsed.Scheme == "http" && ip != nil && ip.IsLoopback())
+	host := parsed.Hostname()
+	ip, ipErr := netip.ParseAddr(host)
+	loopback := (host == "::1" && (parsed.Host == "[::1]" || strings.HasPrefix(parsed.Host, "[::1]:"))) ||
+		(ipErr == nil && ip.Is4() && ip.IsLoopback() && host == ip.String())
+	secure := parsed.Scheme == "https" || (parsed.Scheme == "http" && loopback)
 	invalidPath := parsed.Path != "" && parsed.Path != "/"
-	if !secure || invalidPath || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+	if !secure || invalidPath || parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || strings.Contains(origin, "#") {
 		return nil, errors.New("operation endpoint must be an HTTPS or loopback HTTP origin")
 	}
 	return &HTTP{
@@ -169,14 +188,14 @@ var errorCode = regexp.MustCompile(`^[a-z_]+$`)
 // Invoke calls a single operation with POST and fills output from the response.
 func (transport *HTTP) Invoke(ctx context.Context, operation string, input any, output any) error {
 	if transport.session == nil {
-		return transport.invokeOnce(ctx, operation, input, output, transport.bearer)
+		return transport.invokeOnce(ctx, operation, input, output, transport.bearer, nil)
 	}
 	credentials := transport.session.Credentials()
 	bearer := credentials.AccessToken
 	if operation == "auth.refresh" {
 		bearer = ""
 	}
-	err := transport.invokeOnce(ctx, operation, input, output, bearer)
+	err := transport.invokeOnce(ctx, operation, input, output, bearer, nil)
 	if operation == "auth.refresh" || !isInvalidToken(err) {
 		return err
 	}
@@ -184,20 +203,27 @@ func (transport *HTTP) Invoke(ctx context.Context, operation string, input any, 
 	if err != nil {
 		return err
 	}
-	return transport.invokeOnce(ctx, operation, input, output, credentials.AccessToken)
+	return transport.invokeOnce(ctx, operation, input, output, credentials.AccessToken, nil)
 }
 
 func (transport *HTTP) refreshSession(ctx context.Context, failed SessionCredentials) (SessionCredentials, error) {
 	current := transport.session.Credentials()
-	if current.AccessToken != failed.AccessToken {
+	if current != failed {
 		return current, nil
 	}
 	_, err := transport.refreshes.Do(ctx, current.RefreshToken, func() (string, error) {
 		var rejected SessionCredentials
+		fingerprint := sha256.Sum256([]byte(current.RefreshToken))
+		attempted := false
+		unknownOutcome := false
 		refreshed, err := transport.session.Refresh(context.WithoutCancel(ctx), func(refreshCtx context.Context, latest SessionCredentials) (SessionCredentials, error) {
 			rejected = latest
-			if latest.AccessToken != failed.AccessToken {
+			if latest != failed {
 				return latest, nil
+			}
+			if _, blocked := unknownRefreshes.LoadOrStore(fingerprint, struct{}{}); blocked {
+				unknownOutcome = true
+				return SessionCredentials{}, &OperationError{Code: "invalid_token", Status: http.StatusUnauthorized}
 			}
 			response := struct {
 				AccessToken      string `json:"access_token"`
@@ -207,8 +233,15 @@ func (transport *HTTP) refreshSession(ctx context.Context, failed SessionCredent
 				UserID           string `json:"user_id"`
 				SessionID        string `json:"session_id"`
 			}{}
-			err := transport.invokeOnce(refreshCtx, "auth.refresh", map[string]string{"refresh_token": latest.RefreshToken}, &response, "")
+			// A lost or invalid response cannot prove that the server did not consume the token.
+			attempted = true
+			unknownOutcome = true
+			classified := false
+			err := transport.invokeOnce(refreshCtx, "auth.refresh", map[string]string{"refresh_token": latest.RefreshToken}, &response, "", &classified)
 			if err != nil {
+				if classified {
+					unknownOutcome = false
+				}
 				return SessionCredentials{}, err
 			}
 			refreshed := SessionCredentials(response)
@@ -219,12 +252,19 @@ func (transport *HTTP) refreshSession(ctx context.Context, failed SessionCredent
 			return refreshed, nil
 		})
 		if err != nil {
-			if isUnauthorized(err) {
+			if !unknownOutcome && isUnauthorized(err) {
 				if clearErr := transport.session.Clear(context.WithoutCancel(ctx), rejected); clearErr != nil {
 					return "", errors.Join(err, clearErr)
 				}
 			}
+			if attempted && !unknownOutcome {
+				unknownRefreshes.Delete(fingerprint)
+			}
 			return "", err
+		}
+		// The callback succeeding does not prove that rotated credentials were saved.
+		if attempted {
+			unknownRefreshes.Delete(fingerprint)
 		}
 		return refreshed.AccessToken, nil
 	})
@@ -311,7 +351,7 @@ func isMalformedResponse(err error) bool {
 		strings.HasPrefix(message, "malformed MIME header")
 }
 
-func (transport *HTTP) invokeOnce(ctx context.Context, operation string, input any, output any, bearer string) error {
+func (transport *HTTP) invokeOnce(ctx context.Context, operation string, input any, output any, bearer string, classified *bool) error {
 	if !operationName.MatchString(operation) {
 		return errors.New("invalid operation name")
 	}
@@ -349,9 +389,13 @@ func (transport *HTTP) invokeOnce(ctx context.Context, operation string, input a
 		failure := struct {
 			Error string `json:"error"`
 		}{}
-		code := "operation_failed"
+		code := "invalid_response"
 		if json.Unmarshal(data, &failure) == nil && errorCode.MatchString(failure.Error) {
 			code = failure.Error
+			// Other statuses do not guarantee that a refresh token was left unconsumed.
+			if classified != nil && response.StatusCode == http.StatusUnauthorized {
+				*classified = true
+			}
 		}
 		return &OperationError{Code: code, Status: response.StatusCode}
 	}
