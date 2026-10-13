@@ -170,12 +170,22 @@ func NewHTTPWithTimeout(origin string, timeout time.Duration) (*HTTP, error) {
 	if !secure || invalidPath || parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || strings.Contains(origin, "#") {
 		return nil, errors.New("operation endpoint must be an HTTPS or loopback HTTP origin")
 	}
+	// Go 1.27 HTTP/2 retains a 4 MiB stream window, exceeding our response budget
+	// (net/http/internal/http2/transport.go:45,50; config.go:57,62).
+	standardTransport, ok := http.DefaultTransport.(*http.Transport)
+	if !ok || standardTransport == nil {
+		return nil, errors.New("default transport is not a standard *http.Transport; required to bound response buffering")
+	}
+	clientTransport := standardTransport.Clone()
+	clientTransport.Protocols = new(http.Protocols)
+	clientTransport.Protocols.SetHTTP1(true)
 	return &HTTP{
 		// Serialize through url.URL so IPv6 zone identifiers keep their
 		// canonical percent encoding and the origin still round-trips.
 		origin:    (&url.URL{Scheme: parsed.Scheme, Host: parsed.Host}).String(),
 		refreshes: &refreshFlights{flights: map[string]*refreshFlight{}},
 		client: &http.Client{
+			Transport:     clientTransport,
 			Timeout:       timeout,
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 		},
@@ -378,13 +388,30 @@ func (transport *HTTP) invokeOnce(ctx context.Context, operation string, input a
 	if response.StatusCode >= 300 && response.StatusCode < 400 {
 		return &OperationError{Code: "redirect_not_allowed", Status: response.StatusCode}
 	}
-	data, err := io.ReadAll(io.LimitReader(response.Body, (1<<20)+1))
-	if err != nil {
-		return errors.New("could not read operation response")
+	data := make([]byte, 1<<20)
+	size := 0
+	for {
+		if size == len(data) {
+			var overflow [1]byte
+			n, err := io.ReadFull(response.Body, overflow[:])
+			if n != 0 {
+				return errors.New("operation response is too large")
+			}
+			if err != io.EOF {
+				return errors.New("could not read operation response")
+			}
+			break
+		}
+		n, err := response.Body.Read(data[size:])
+		size += n
+		if err != nil {
+			if err != io.EOF {
+				return errors.New("could not read operation response")
+			}
+			break
+		}
 	}
-	if len(data) > 1<<20 {
-		return errors.New("operation response is too large")
-	}
+	data = data[:size]
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		failure := struct {
 			Error string `json:"error"`

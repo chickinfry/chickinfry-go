@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -1051,5 +1052,161 @@ func TestHTTPRefreshJoinsWithoutStoreSerialization(t *testing.T) {
 	}
 	if refreshes.Load() != 1 || store.calls.Load() != 1 || store.Credentials() != rotated {
 		t.Fatalf("SDK join failed: refreshes=%d store calls=%d", refreshes.Load(), store.calls.Load())
+	}
+}
+
+type responseTransport func(*http.Request) (*http.Response, error)
+
+func (transport responseTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	return transport(request)
+}
+
+type countingResponseBody struct {
+	io.Reader
+	readBytes int
+	maxBuffer int
+	reads     int
+	closed    bool
+}
+
+func (body *countingResponseBody) Read(buffer []byte) (int, error) {
+	body.reads++
+	body.maxBuffer = max(body.maxBuffer, cap(buffer))
+	n, err := body.Reader.Read(buffer)
+	body.readBytes += n
+	return n, err
+}
+
+func (body *countingResponseBody) Close() error {
+	body.closed = true
+	return nil
+}
+
+func TestHTTPBoundsResponseRetentionAndStopsReading(t *testing.T) {
+	const limit = 1 << 20
+	for _, test := range []struct {
+		name      string
+		status    int
+		bodyBytes int
+		wantRead  int
+		wantError string
+	}{
+		{"at limit", 200, limit, limit, ""},
+		{"one byte over limit", 200, limit + 1, limit + 1, "operation response is too large"},
+		{"stop before tail", 200, limit + 65536, limit + 1, "operation response is too large"},
+		{"large redirect", 307, limit + 65536, 0, "redirect_not_allowed"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			body := &countingResponseBody{Reader: strings.NewReader("{}" + strings.Repeat(" ", test.bodyBytes-2))}
+			transport, err := NewHTTP("https://fixture.example")
+			if err != nil {
+				t.Fatal(err)
+			}
+			transport.client.Transport = responseTransport(func(request *http.Request) (*http.Response, error) {
+				return &http.Response{StatusCode: test.status, Body: body, Header: make(http.Header), Request: request}, nil
+			})
+			err = transport.Invoke(t.Context(), "catalog.create", map[string]string{}, &struct{}{})
+			if test.status == 307 {
+				failure, ok := errors.AsType[*OperationError](err)
+				if !ok || failure.Code != test.wantError || failure.Status != test.status {
+					t.Fatalf("redirect error = %v", err)
+				}
+			} else if test.wantError == "" {
+				if err != nil {
+					t.Fatal(err)
+				}
+			} else if err == nil || err.Error() != test.wantError {
+				t.Fatalf("response error = %v", err)
+			}
+			if body.readBytes != test.wantRead || body.maxBuffer > limit || !body.closed {
+				t.Fatalf("read=%d maxBuffer=%d closed=%t", body.readBytes, body.maxBuffer, body.closed)
+			}
+			if test.status == 307 && body.reads != 0 {
+				t.Fatalf("redirect body read %d times", body.reads)
+			}
+			if test.wantRead == limit+1 && body.reads != 2 {
+				t.Fatalf("overflow read %d times, want 2", body.reads)
+			}
+		})
+	}
+}
+
+func TestHTTPUsesHTTP1AgainstHTTP2CapableTLSOrigin(t *testing.T) {
+	var protocol atomic.Int64
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		protocol.Store(int64(request.ProtoMajor))
+		writeRefreshResponse(t, response, http.StatusOK, map[string]string{})
+	}))
+	server.EnableHTTP2 = true
+	server.StartTLS()
+	defer server.Close()
+	transport, err := NewHTTP(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owned := transport.client.Transport.(*http.Transport)
+	owned.TLSClientConfig = server.Client().Transport.(*http.Transport).TLSClientConfig.Clone()
+	if err := transport.Invoke(t.Context(), "catalog.create", map[string]string{}, &struct{}{}); err != nil {
+		t.Fatal(err)
+	}
+	if protocol.Load() != 1 {
+		t.Fatalf("negotiated HTTP/%d, want HTTP/1", protocol.Load())
+	}
+	if owned == http.DefaultTransport {
+		t.Fatal("runtime modified the shared default transport")
+	}
+}
+
+func TestHTTPRejectsReplacedDefaultTransportWithoutPanic(t *testing.T) {
+	original := http.DefaultTransport
+	t.Cleanup(func() { http.DefaultTransport = original })
+	http.DefaultTransport = responseTransport(func(request *http.Request) (*http.Response, error) {
+		t.Fatal("constructor sent a request through the replaced default")
+		return nil, errors.New("unexpected request")
+	})
+	transport, err := NewHTTP("https://fixture.example")
+	if transport != nil || err == nil || err.Error() != "default transport is not a standard *http.Transport; required to bound response buffering" {
+		t.Fatalf("replaced default constructor result = %v, %v", transport, err)
+	}
+}
+
+type responseFailureReader struct{ remaining int }
+
+func (reader *responseFailureReader) Read(buffer []byte) (int, error) {
+	if reader.remaining == 0 {
+		return 0, errors.New("fixture read failure")
+	}
+	n := min(len(buffer), reader.remaining)
+	for index := range n {
+		buffer[index] = ' '
+	}
+	reader.remaining -= n
+	return n, nil
+}
+
+func TestHTTPPreservesInvalidAndUnreadableResponseErrors(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		reader io.Reader
+		want   string
+	}{
+		{"invalid JSON", strings.NewReader("not JSON"), "invalid operation response"},
+		{"body read failure", &responseFailureReader{remaining: 16}, "could not read operation response"},
+		{"overflow probe read failure", &responseFailureReader{remaining: 1 << 20}, "could not read operation response"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			body := &countingResponseBody{Reader: test.reader}
+			transport, err := NewHTTP("https://fixture.example")
+			if err != nil {
+				t.Fatal(err)
+			}
+			transport.client.Transport = responseTransport(func(request *http.Request) (*http.Response, error) {
+				return &http.Response{StatusCode: 200, Body: body, Header: make(http.Header), Request: request}, nil
+			})
+			err = transport.Invoke(t.Context(), "catalog.create", map[string]string{}, &struct{}{})
+			if err == nil || err.Error() != test.want || !body.closed {
+				t.Fatalf("response error=%v closed=%t", err, body.closed)
+			}
+		})
 	}
 }
