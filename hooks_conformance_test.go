@@ -227,7 +227,7 @@ func TestConformanceRefreshBarriersAndClearTrace(t *testing.T) {
 }
 
 func TestConformanceRefreshJoinUsesTheSameOpaqueReference(t *testing.T) {
-	flights := &refreshFlights{flights: make(map[string]*refreshFlight)}
+	flights := new(refreshFlights)
 	token := newRefreshStore().Credentials().RefreshToken
 	started := make(chan struct{})
 	release := make(chan struct{})
@@ -261,12 +261,12 @@ func TestConformanceRefreshJoinUsesTheSameOpaqueReference(t *testing.T) {
 	}
 	defer end()
 	go func() {
-		_, err := flights.Do(leader, token, func() (string, error) { close(started); <-release; return "", nil })
+		_, err := flights.Do(leader, refreshKey{token: token}, func() (string, error) { close(started); <-release; return "", nil })
 		results <- err
 	}()
 	<-started
 	go func() {
-		_, err := flights.Do(follower, token, func() (string, error) { return "", errors.New("unexpected second flight") })
+		_, err := flights.Do(follower, refreshKey{token: token}, func() (string, error) { return "", errors.New("unexpected second flight") })
 		results <- err
 	}()
 	<-joined
@@ -298,7 +298,7 @@ func TestConformanceIndependentRefreshFlightsHaveDistinctReferences(t *testing.T
 		if err != nil {
 			t.Fatal(err)
 		}
-		_, err = store.refreshes.Do(ctx, token, func() (string, error) {
+		_, err = store.refreshes.Do(ctx, refreshKey{token: token}, func() (string, error) {
 			return "", conformanceRefreshSent(ctx)
 		})
 		finish()
@@ -639,7 +639,8 @@ func TestConformanceIndependentClientsDoNotInferRefreshSharing(t *testing.T) {
 			rotated.AccessToken = strings.Repeat("c", 43)
 			started := make(chan struct{})
 			release := make(chan struct{})
-			pathEntered := make(chan struct{})
+			pathEntered := make(chan ConformanceSessionEvent, 1)
+			leaderRef := make(chan string, 1)
 			unblock := sync.OnceFunc(func() { close(release) })
 			server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 				if request.URL.Path == "/auth.refresh" {
@@ -672,27 +673,27 @@ func TestConformanceIndependentClientsDoNotInferRefreshSharing(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			var mu sync.Mutex
-			var secondTrace []ConformanceSessionEvent
 			ctx := WithConformanceHooks(t.Context(), "call:independent", ConformanceHooks{SessionTrace: func(event ConformanceSessionEvent) {
-				mu.Lock()
-				secondTrace = append(secondTrace, event)
-				mu.Unlock()
-				if event.StorePath {
-					close(pathEntered)
+				if event.StorePath || event.Joined != nil && *event.Joined {
+					pathEntered <- event
 				}
 			}})
 			results := make(chan error, 2)
 			go func() {
-				results <- first.Invoke(WithConformanceHooks(t.Context(), "call:first", ConformanceHooks{}), "catalog.create", map[string]string{}, &struct{}{})
+				results <- first.Invoke(WithConformanceHooks(t.Context(), "call:first", ConformanceHooks{SessionTrace: func(event ConformanceSessionEvent) {
+					if event.RefreshRef != nil && event.Joined != nil && !*event.Joined {
+						leaderRef <- *event.RefreshRef
+					}
+				}}), "catalog.create", map[string]string{}, &struct{}{})
 			}()
 			<-started
 			go func() { results <- second.Invoke(ctx, "catalog.create", map[string]string{}, &struct{}{}) }()
-			<-pathEntered
-			mu.Lock()
-			firstPath := secondTrace[0]
-			mu.Unlock()
-			if firstPath.Joined != nil || firstPath.RefreshRef != nil || firstPath.Measurable {
+			firstPath := <-pathEntered
+			if shared {
+				if firstPath.Joined == nil || !*firstPath.Joined || firstPath.RefreshRef == nil || !firstPath.Measurable || *firstPath.RefreshRef != <-leaderRef {
+					t.Fatalf("actual store flight was not shared=%+v", firstPath)
+				}
+			} else if firstPath.Joined != nil || firstPath.RefreshRef != nil || firstPath.Measurable {
 				t.Fatalf("store sharing inferred=%+v", firstPath)
 			}
 			remaining := 2
@@ -946,7 +947,7 @@ func TestConformanceInitiatorBarrierDoesNotBlockRequestSend(t *testing.T) {
 					t.Fatal("initiator barrier did not observe peer arrival")
 				}
 				signed.refreshes.mu.Lock()
-				flight := signed.refreshes.flights[original.RefreshToken]
+				flight := signed.refreshes.flights[refreshKey{store: store, token: original.RefreshToken}]
 				signed.refreshes.mu.Unlock()
 				if flight == nil {
 					t.Fatal("refresh passed its held barrier")
@@ -1030,7 +1031,7 @@ func TestConformanceCanceledCallPreservesSharedExchangeObservation(t *testing.T)
 	go func() { result <- signed.Invoke(ctx, "catalog.create", map[string]string{}, &struct{}{}) }()
 	<-peer
 	signed.refreshes.mu.Lock()
-	flight := signed.refreshes.flights[store.Credentials().RefreshToken]
+	flight := signed.refreshes.flights[refreshKey{store: store, token: store.Credentials().RefreshToken}]
 	signed.refreshes.mu.Unlock()
 	cancel()
 	if err := <-result; !errors.Is(err, context.Canceled) {

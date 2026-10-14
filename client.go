@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
+	"reflect"
 	"regexp"
 	"strings"
 	"sync"
@@ -53,8 +54,11 @@ type SessionCredentials struct {
 // SessionStore defines reading, saving, and ending session credentials owned by the caller.
 // Refresh must serialize on the shared session unit, read its latest credentials,
 // and persist successful results before returning. Clear must match expected credentials.
-// MemoryStore provides these guarantees in memory and shares the SDK refresh flight
-// across clients. Custom stores remain responsible for their own shared storage semantics.
+// MemoryStore provides these storage guarantees in memory.
+// The SDK shares in-flight refreshes across clients bound to the same comparable
+// store value in one process. Non-comparable or non-reflexive values use per-binding
+// flights. Custom stores remain responsible for their own shared storage semantics.
+// Use a store only with clients for the same origin.
 type SessionStore interface {
 	Credentials() SessionCredentials
 	Refresh(ctx context.Context, operation func(context.Context, SessionCredentials) (SessionCredentials, error)) (SessionCredentials, error)
@@ -69,8 +73,15 @@ type refreshFlight struct {
 
 type refreshFlights struct {
 	mu      sync.Mutex
-	flights map[string]*refreshFlight
+	flights map[refreshKey]*refreshFlight
 }
+
+type refreshKey struct {
+	store SessionStore
+	token string
+}
+
+var customRefreshes refreshFlights
 
 // ponytail: retain one fingerprint per unknown refresh token for the process
 // lifetime (O(unknown tokens)); use durable store state if restart recovery is needed.
@@ -78,15 +89,15 @@ var unknownRefreshes sync.Map
 
 var tokenPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{43}$`)
 
-func (flights *refreshFlights) Do(ctx context.Context, refreshToken string, run func() (string, error)) (string, error) {
+func (flights *refreshFlights) Do(ctx context.Context, key refreshKey, run func() (string, error)) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
 	flights.mu.Lock()
 	if flights.flights == nil {
-		flights.flights = make(map[string]*refreshFlight)
+		flights.flights = make(map[refreshKey]*refreshFlight)
 	}
-	if flight, ok := flights.flights[refreshToken]; ok {
+	if flight, ok := flights.flights[key]; ok {
 		flights.mu.Unlock()
 		if err := conformanceJoin(ctx, flight, false); err != nil {
 			return "", err
@@ -99,17 +110,17 @@ func (flights *refreshFlights) Do(ctx context.Context, refreshToken string, run 
 		}
 	}
 	flight := &refreshFlight{done: make(chan struct{})}
-	flights.flights[refreshToken] = flight
-	conformanceFlightRegister(ctx, flight, refreshToken)
+	flights.flights[key] = flight
+	conformanceFlightRegister(ctx, flight, key.token)
 	flights.mu.Unlock()
 	go func() {
 		defer func() {
 			if recover() != nil {
-				unknownRefreshes.Store(sha256.Sum256([]byte(refreshToken)), struct{}{})
+				unknownRefreshes.Store(sha256.Sum256([]byte(key.token)), struct{}{})
 				flight.err = errors.New("session refresh failed; sign in again")
 			}
 			flights.mu.Lock()
-			delete(flights.flights, refreshToken)
+			delete(flights.flights, key)
 			conformanceFlightEnd(flight)
 			close(flight.done)
 			flights.mu.Unlock()
@@ -140,8 +151,11 @@ func (transport *HTTP) WithBearer(token string) (*HTTP, error) {
 }
 
 // WithSession returns a copy that uses the given session store.
-// Clients bound to the same MemoryStore share one refresh flight. Each custom
-// store binding enters its own Refresh path to synchronize cached credentials.
+// Clients bound to the same comparable store value share one in-flight refresh
+// in this process. Pointer stores share by pointer identity; equal value stores
+// share by value equality. Non-comparable or non-reflexive values (such as values
+// containing NaN) use per-binding flights. The shared flight registry retains stores
+// only until their flights complete. Use a store only with clients for the same origin.
 func (transport *HTTP) WithSession(store SessionStore) (*HTTP, error) {
 	if store == nil {
 		return nil, errors.New("session store is required")
@@ -158,9 +172,11 @@ func (transport *HTTP) WithSession(store SessionStore) (*HTTP, error) {
 		return nil, err
 	}
 	signed.session = store
-	signed.refreshes = &refreshFlights{flights: map[string]*refreshFlight{}}
+	signed.refreshes = new(refreshFlights)
 	if memory, ok := store.(*MemoryStore); ok {
 		signed.refreshes = &memory.refreshes
+	} else if reflect.ValueOf(store).Comparable() && store == store {
+		signed.refreshes = &customRefreshes
 	}
 	return signed, nil
 }
@@ -201,7 +217,7 @@ func NewHTTPWithTimeout(origin string, timeout time.Duration) (*HTTP, error) {
 		// Serialize through url.URL so IPv6 zone identifiers keep their
 		// canonical percent encoding and the origin still round-trips.
 		origin:    (&url.URL{Scheme: parsed.Scheme, Host: parsed.Host}).String(),
-		refreshes: &refreshFlights{flights: map[string]*refreshFlight{}},
+		refreshes: new(refreshFlights),
 		client: &http.Client{
 			Transport:     clientTransport,
 			Timeout:       timeout,
@@ -247,7 +263,11 @@ func (transport *HTTP) refreshSession(ctx context.Context, failed SessionCredent
 	if current != failed {
 		return current, nil
 	}
-	_, err := transport.refreshes.Do(ctx, current.RefreshToken, func() (string, error) {
+	key := refreshKey{token: current.RefreshToken}
+	if transport.refreshes == &customRefreshes {
+		key.store = transport.session
+	}
+	_, err := transport.refreshes.Do(ctx, key, func() (string, error) {
 		var rejected SessionCredentials
 		fingerprint := sha256.Sum256([]byte(current.RefreshToken))
 		attempted := false
