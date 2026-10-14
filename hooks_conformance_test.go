@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,6 +21,263 @@ import (
 	"testing/synctest"
 	"time"
 )
+
+func TestConformanceRetainedBytesOracle(t *testing.T) {
+	const limit = 1 << 20
+	for _, path := range []string{"redirect", "overflow"} {
+		for _, framing := range []string{"content-length", "chunked"} {
+			t.Run(path+"/"+framing, func(t *testing.T) {
+				ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+				defer cancel()
+				client, peer := net.Pipe()
+				deadline, _ := ctx.Deadline()
+				if err := peer.SetDeadline(deadline); err != nil {
+					t.Fatal(err)
+				}
+				release := make(chan struct{})
+				unblock := sync.OnceFunc(func() { close(release) })
+				peerDone := make(chan error, 1)
+				go func() {
+					peerDone <- func() error {
+						defer peer.Close()
+						request, err := http.ReadRequest(bufio.NewReader(peer))
+						if err != nil {
+							return err
+						}
+						_, err = io.Copy(io.Discard, request.Body)
+						request.Body.Close()
+						if err != nil {
+							return err
+						}
+						status := http.StatusOK
+						if path == "redirect" {
+							status = http.StatusTemporaryRedirect
+						}
+						headers := fmt.Sprintf("HTTP/1.1 %d %s\r\n", status, http.StatusText(status))
+						if framing == "chunked" {
+							firstChunk := limit - 1
+							if path == "redirect" {
+								firstChunk = 2 * limit
+							}
+							headers += fmt.Sprintf("Transfer-Encoding: chunked\r\n\r\n%x\r\n", firstChunk)
+						} else {
+							headers += fmt.Sprintf("Content-Length: %d\r\n\r\n", 2*limit)
+						}
+						// One pipe read gives net/http the headers and a nonempty body buffer.
+						if _, err := io.WriteString(peer, headers+strings.Repeat("Z", 128)); err != nil {
+							return err
+						}
+						if path == "overflow" {
+							if _, err := io.WriteString(peer, strings.Repeat("Z", limit-1-128)); err != nil {
+								return err
+							}
+							select {
+							case <-release:
+							case <-ctx.Done():
+								return ctx.Err()
+							}
+							next := strings.Repeat("Z", 4096)
+							if framing == "chunked" {
+								// End the first chunk only after the independent Q checkpoint.
+								next = "\r\n1000\r\n" + next
+							}
+							if _, err := io.WriteString(peer, next); err != nil && !errors.Is(err, io.ErrClosedPipe) {
+								return err
+							}
+						}
+						// The remaining body is withheld until the SDK closes the connection.
+						_, err = io.Copy(io.Discard, peer)
+						if errors.Is(err, io.ErrClosedPipe) {
+							return nil
+						}
+						return err
+					}()
+				}()
+				t.Cleanup(func() {
+					cancel()
+					client.Close()
+					peer.Close()
+					if err := <-peerDone; err != nil {
+						t.Errorf("pipe peer: %v", err)
+					}
+				})
+				transport, err := NewHTTP("http://127.0.0.1")
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer transport.client.CloseIdleConnections()
+				transport.client.Transport.(*http.Transport).DialContext = func(context.Context, string, string) (net.Conn, error) {
+					return client, nil
+				}
+				var mu sync.Mutex
+				var q, library, peak int64
+				var dataLength, dataCapacity int
+				var probes, liveEvents int
+				var headersSeen, fullSeen, librarySeen, cancelled, closed, completed bool
+				var failures []string
+				ctx = context.WithValue(ctx, conformanceProbeKey{}, func(response *http.Response, data []byte) {
+					mu.Lock()
+					defer mu.Unlock()
+					probes++
+					dataLength, dataCapacity = len(data), cap(data)
+					q = 0
+					var zeroSeen bool
+					for _, value := range data {
+						switch value {
+						case 'Z':
+							q++
+							if zeroSeen {
+								failures = append(failures, "noncontiguous SDK payload")
+							}
+						case 0:
+							zeroSeen = true
+						default:
+							failures = append(failures, "unexpected SDK payload byte")
+						}
+					}
+					peak = max(peak, q)
+					var err error
+					library, err = conformanceOracleLibrary(response, framing)
+					if err != nil {
+						failures = append(failures, err.Error())
+					}
+					if q == limit-1 {
+						unblock()
+					}
+				})
+				ctx = WithConformanceHooks(ctx, "call:oracle", ConformanceHooks{Observe: func(event ConformanceTransportEvent) {
+					mu.Lock()
+					defer mu.Unlock()
+					if event.PeakRetainedBytes != peak {
+						failures = append(failures, fmt.Sprintf("%s peak: reported=%d oracle=%d", event.Phase, event.PeakRetainedBytes, peak))
+					}
+					switch event.Phase {
+					case "headers", "read", "limit", "cancel-requested":
+						if event.Phase == "headers" || event.Phase == "read" {
+							liveEvents++
+							if liveEvents != probes {
+								failures = append(failures, "event has no matching probe")
+							}
+						}
+						if event.RetainedBytes != q || event.RuntimeRetainedBytes != q {
+							failures = append(failures, fmt.Sprintf("%s Q: retained=%d runtime=%d oracle=%d len=%d cap=%d",
+								event.Phase, event.RetainedBytes, event.RuntimeRetainedBytes, q, dataLength, dataCapacity))
+						}
+						if !event.Measurable || event.LibraryRetainedBytes == nil || event.TotalHeldBytes == nil {
+							failures = append(failures, "live buffer measurement unavailable")
+						} else {
+							if *event.LibraryRetainedBytes != library {
+								failures = append(failures, fmt.Sprintf("%s L: reported=%d oracle=%d", event.Phase, *event.LibraryRetainedBytes, library))
+							}
+							if *event.TotalHeldBytes != q+library {
+								failures = append(failures, fmt.Sprintf("%s total: reported=%d oracle=%d", event.Phase, *event.TotalHeldBytes, q+library))
+							}
+						}
+						if event.Phase == "headers" {
+							headersSeen = true
+							if q != 0 || dataLength != 0 || dataCapacity != 0 || library != 128 {
+								failures = append(failures, fmt.Sprintf("header buffers: Q=%d L=%d len=%d cap=%d", q, library, dataLength, dataCapacity))
+							}
+						} else if event.Phase == "read" {
+							if dataLength != limit || dataCapacity != limit {
+								failures = append(failures, "SDK reserved array changed")
+							}
+							fullSeen = fullSeen || q == limit
+							librarySeen = librarySeen || library > 0
+						}
+					case "cancel-observed":
+						cancelled = true
+					case "reader-closed":
+						closed = true
+					case "completed":
+						completed = true
+					}
+				}})
+				err = transport.Invoke(ctx, "catalog.create", map[string]string{}, &struct{}{})
+				mu.Lock()
+				defer mu.Unlock()
+				if err == nil || errors.Is(err, context.DeadlineExceeded) || ctx.Err() != nil {
+					t.Fatalf("expected prompt rejection, got %v (context: %v)", err, ctx.Err())
+				}
+				if !headersSeen || !cancelled || !closed || !completed {
+					t.Error("missing headers, cancellation, reader closure or completion")
+				}
+				if path == "overflow" && (!fullSeen || !librarySeen) {
+					t.Error("missing full SDK array or positive library checkpoint")
+				}
+				for _, failure := range failures {
+					t.Error(failure)
+				}
+			})
+		}
+	}
+}
+
+func conformanceOracleLibrary(response *http.Response, framing string) (int64, error) {
+	value := reflect.ValueOf(response.Body)
+	if value.Type().String() == "*http.cancelTimerBody" {
+		var err error
+		value, err = conformanceOracleField(value, "net/http", "cancelTimerBody", "rc")
+		if err != nil {
+			return 0, err
+		}
+	}
+	chain := []struct{ pkg, name, field string }{
+		{pkg: "net/http", name: "bodyEOFSignal", field: "body"},
+		{pkg: "net/http", name: "body", field: "src"},
+	}
+	if framing == "chunked" {
+		chain = append(chain, struct{ pkg, name, field string }{pkg: "net/http/internal", name: "chunkedReader", field: "r"})
+	} else {
+		chain = append(chain, struct{ pkg, name, field string }{pkg: "io", name: "LimitedReader", field: "R"})
+	}
+	for _, step := range chain {
+		var err error
+		value, err = conformanceOracleField(value, step.pkg, step.name, step.field)
+		if err != nil {
+			return 0, err
+		}
+	}
+	buffer, err := conformanceOracleField(value, "bufio", "Reader", "buf")
+	if err != nil {
+		return 0, err
+	}
+	r, err := conformanceOracleField(value, "bufio", "Reader", "r")
+	if err != nil {
+		return 0, err
+	}
+	w, err := conformanceOracleField(value, "bufio", "Reader", "w")
+	if err != nil {
+		return 0, err
+	}
+	if buffer.Kind() != reflect.Slice || buffer.Type().Elem().Kind() != reflect.Uint8 || r.Kind() != reflect.Int || w.Kind() != reflect.Int {
+		return 0, errors.New("unexpected bufio fields")
+	}
+	data := buffer.Bytes()
+	start, end := r.Int(), w.Int()
+	if len(data) != 4096 || start < 0 || start > end || end > int64(len(data)) {
+		return 0, fmt.Errorf("unexpected bufio window: len=%d r=%d w=%d", len(data), start, end)
+	}
+	return int64(bytes.Count(data[start:end], []byte{'Z'})), nil
+}
+
+func conformanceOracleField(value reflect.Value, pkg, name, field string) (reflect.Value, error) {
+	if value.Kind() == reflect.Interface && !value.IsNil() {
+		value = value.Elem()
+	}
+	if value.Kind() != reflect.Pointer || value.IsNil() {
+		return reflect.Value{}, fmt.Errorf("expected *%s.%s", pkg, name)
+	}
+	value = value.Elem()
+	if value.Kind() != reflect.Struct || value.Type().PkgPath() != pkg || value.Type().Name() != name {
+		return reflect.Value{}, fmt.Errorf("expected %s.%s, got %s", pkg, name, value.Type())
+	}
+	value = value.FieldByName(field)
+	if !value.IsValid() {
+		return reflect.Value{}, fmt.Errorf("missing %s.%s.%s", pkg, name, field)
+	}
+	return value, nil
+}
 
 func TestConformanceTransportPhasesAndRealBuffers(t *testing.T) {
 	const limit = 1 << 20

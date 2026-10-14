@@ -21,12 +21,13 @@ func conformanceClear(ctx context.Context, store SessionStore, expected SessionC
 func conformanceRequest(ctx context.Context, client *http.Client, _ string, _ int) (context.Context, *http.Client, func(error)) {
 	return ctx, client, func(error) {}
 }
-func conformanceHeaders(context.Context, *http.Response) {}
-func conformanceResult(context.Context, error)           {}
-func conformanceDecode(context.Context)                  {}
-func conformanceRefreshFailure(context.Context)          {}
-func conformanceRefreshBlocked(context.Context)          {}
-func conformanceRejection(context.Context, bool)         {}
+func conformanceHeaders(context.Context, *http.Response)       {}
+func conformanceProbe(context.Context, *http.Response, []byte) {}
+func conformanceResult(context.Context, error)                 {}
+func conformanceDecode(context.Context)                        {}
+func conformanceRefreshFailure(context.Context)                {}
+func conformanceRefreshBlocked(context.Context)                {}
+func conformanceRejection(context.Context, bool)               {}
 func conformanceDo(client *http.Client, request *http.Request) (*http.Response, error) {
 	return client.Do(request)
 }

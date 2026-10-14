@@ -88,8 +88,22 @@ and Go 1.27.2 `net/http/transport.go:329-333,2120` select and construct the
 bufio reader; both versions' `bufio/bufio.go:50-59` allocate exactly
 max(ReadBufferSize,16). `net/http/internal/chunked.go:27-35` reuses that reader,
 so content-length and chunked responses do not gain another payload buffer.
-The runtime counts its cumulative body buffer and the actual socket payload
-separately. Its test-only parser holds HTTP/chunk framing, not a body copy.
+The runtime reports the valid cumulative body bytes (Q) separately from the
+library's active, undelivered payload bytes (L). Its wire parser holds
+HTTP/chunk framing, not a body copy. The retained buffer inventory is:
+
+| Storage | Active body bytes and lifetime |
+| --- | --- |
+| SDK `data` | One zero-initialized 1 MiB array; Q counts populated bytes, not reserved capacity. The final slice aliases the same array. Redirect rejection precedes allocation, so Q is zero. |
+| HTTP/1 `persistConn.br.buf` | One 4096-byte array; L counts body bytes in `buf[r:w]`, excluding consumed bytes, unused capacity and chunk framing. Content-length and chunked readers share it. |
+| Overflow check | A separate one-byte handoff counted in reads, excluded from Q/peak and the diagnostic total. |
+
+`RetainedBytes` and `RuntimeRetainedBytes` report Q; `PeakRetainedBytes` is the
+call-wide maximum Q. `LibraryRetainedBytes` reports L even though the fixed
+I/O buffer is excluded from retained/peak. `TotalHeldBytes` is the internal
+diagnostic Q+L, not process heap usage. Body wrappers reference these stores
+without another payload copy; chunk CRLF storage is framing. Request, peer and
+OS buffers are outside SDK-owned response body storage.
 These bounds cover the fixed loopback peer; HTTPS/TLS buffers remain unmeasured.
 The complete capability covers C-04/C-05's oversized 3xx variants, which stop
 before JSON decoding (guarded by a decoder sentinel test). Other calls that
@@ -139,6 +153,39 @@ explicit deadline/entry/release channels instead of wall-clock ordering. Tests
 under `chik_conformance` also exercise the generated bridges, input presence and
 descriptor validation against the coordinator-prepared alias modules. Run them
 from a prepared module with the coordinator-owned local replacements.
+
+The root tagged `TestConformanceRetainedBytesOracle` independently checks the
+inventory above through the real `NewHTTP`/`net/http.Transport` path over
+`net.Pipe`. A private synchronous probe receives only the actual response and
+SDK array view before headers/read observations. It stores numbers, never
+body views. The oracle counts fixed `Z` bytes in the entire actual `data` array
+and, using read-only reflection, in the actual bufio active window. It follows
+the optional `cancelTimerBody.rc`, then `bodyEOFSignal.body`, `body.src`, and
+`LimitedReader.R` or `chunkedReader.r` wrappers. Unexpected types, fields or
+buffer bounds fail the test; no unsafe access, fallback or skipped measurement
+is used. Go source pins are 1.26.9
+(`2ae494ef9fb90e0da0073c31800ba38870249994`) and 1.27.2
+(`022c8636110ebac86a9b88724cda168ed713c21f`).
+
+Redirect/overflow and content-length/chunked subtests force positive library
+checkpoints and, for overflow, a full SDK array. Only independently measured
+Q releases the peer gate. Expected Q, L, Q+L and maximum Q never use accounting
+counters or events. All comparisons have zero-byte tolerance; terminal events
+preserve the independently measured peak without re-reading closed buffers.
+The fixed inventory must be updated if another cumulative payload copy is
+introduced. Decoder copies remain outside this oracle's scope.
+
+Run from the root with each pinned toolchain:
+
+```sh
+go test -race -count=1 -tags=chik_conformance -run '^TestConformanceRetainedBytesOracle$' .
+```
+
+Honest proportional retention is checked by the real driver and shared C-04
+aggregation. Missing SDK/library bytes are checked by this independent oracle:
+one-byte omissions must fail the overflow/redirect subtests respectively.
+Shared CLI CI expectations are unchanged regression checks. The root CI runs
+untagged tests and does not yet run this tagged oracle automatically.
 
 These tests and a successful coordinator build establish driver behavior and
 linkage only. Missing hooks and shared conformance observations remain

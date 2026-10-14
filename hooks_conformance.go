@@ -84,6 +84,15 @@ type ConformanceBarrierEvent struct {
 
 type conformanceKey struct{}
 type conformanceExchangeKey struct{}
+type conformanceProbeKey struct{}
+
+// Package tests inspect live buffers synchronously, outside the observation lock.
+func conformanceProbe(ctx context.Context, response *http.Response, data []byte) {
+	probe, _ := ctx.Value(conformanceProbeKey{}).(func(*http.Response, []byte))
+	if probe != nil {
+		probe(response, data)
+	}
+}
 
 type conformanceState struct {
 	hooks                ConformanceHooks

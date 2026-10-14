@@ -452,6 +452,7 @@ func (transport *HTTP) invokeOnce(ctx context.Context, operation string, input a
 	if err != nil {
 		return newTransportError(err)
 	}
+	conformanceProbe(requestCtx, response, nil)
 	conformanceHeaders(requestCtx, response)
 	defer func() { response.Body.Close(); conformanceReaderClosed(requestCtx) }()
 	if response.StatusCode >= 300 && response.StatusCode < 400 {
@@ -464,6 +465,7 @@ func (transport *HTTP) invokeOnce(ctx context.Context, operation string, input a
 		if size == len(data) {
 			var overflow [1]byte
 			n, err := io.ReadFull(response.Body, overflow[:])
+			conformanceProbe(requestCtx, response, data)
 			if conformanceRead(requestCtx, n, size) {
 				return errors.New("operation response is too large")
 			}
@@ -478,6 +480,7 @@ func (transport *HTTP) invokeOnce(ctx context.Context, operation string, input a
 		}
 		n, err := response.Body.Read(data[size:])
 		size += n
+		conformanceProbe(requestCtx, response, data)
 		if conformanceRead(requestCtx, n, size) {
 			return errors.New("operation response is too large")
 		}
