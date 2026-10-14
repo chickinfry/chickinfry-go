@@ -43,11 +43,23 @@ type Auth struct {
 	connection *database.Connection
 	db         *private.Database
 	hooks      Hooks
+	policy     SessionPolicy
 }
 
 // New binds the private repositories and generated hook adapter to a request.
-func New(connection *database.Connection, hooks Hooks) *Auth {
-	return &Auth{connection, private.New(connection), hooks}
+// An omitted policy uses a 30-day idle timeout without an absolute lifetime.
+func New(connection *database.Connection, hooks Hooks, policies ...SessionPolicy) *Auth {
+	policy := SessionPolicy{idleTimeoutSeconds: 2592000}
+	if len(policies) > 1 {
+		panic("only one session policy is allowed")
+	}
+	if len(policies) == 1 {
+		policy = policies[0]
+		if policy.idleTimeoutSeconds == 0 {
+			panic("session policy must be created with NewSessionPolicy")
+		}
+	}
+	return &Auth{connection, private.New(connection), hooks, policy}
 }
 
 func fail(status int, code string) error     { return &server.Error{Status: status, Code: code} }
@@ -57,8 +69,7 @@ func timestamp(value time.Time) string       { return value.UTC().Format("2006-0
 func now() string                            { return timestamp(time.Now()) }
 func expiry(value string) (time.Time, error) { return time.Parse(time.RFC3339Nano, value) }
 func expired(value string) (bool, error) {
-	deadline, err := expiry(value)
-	return !deadline.After(time.Now()), err
+	return expiredAt(time.Now(), value)
 }
 func digest(value string) string {
 	result := sha256.Sum256([]byte(value))
@@ -132,19 +143,7 @@ func (auth *Auth) rateLimit(action, email string) error {
 	return fail(429, "rate_limited")
 }
 
-const (
-	accessLifetime        = 15 * time.Minute
-	refreshFamilyLifetime = 7 * 24 * time.Hour
-)
-
-func tokenExpirations(issued time.Time, family string) (string, string) {
-	if family == "" {
-		family = timestamp(issued.Add(refreshFamilyLifetime))
-	}
-	return timestamp(issued.Add(accessLifetime)), family
-}
-
-func issue(db *private.Database, user private.AppAuthUsersRow) (Tokens, error) {
+func (auth *Auth) issue(db *private.Database, user private.AppAuthUsersRow) (Tokens, error) {
 	access, err := token()
 	if err != nil {
 		return Tokens{}, err
@@ -154,12 +153,12 @@ func issue(db *private.Database, user private.AppAuthUsersRow) (Tokens, error) {
 		return Tokens{}, err
 	}
 	issued := time.Now()
-	until, family := tokenExpirations(issued, "")
-	session, err := db.AppAuthSessions.Insert(private.AppAuthSessionsInsert{UserID: user.ID, TokenHash: digest(access), UserSessionVersion: user.SessionVersion, ExpiresAt: until, Transport: set("native")})
+	until, family := tokenExpirations(issued, issued, auth.policy)
+	session, err := db.AppAuthSessions.Insert(private.AppAuthSessionsInsert{UserID: user.ID, TokenHash: digest(access), UserSessionVersion: user.SessionVersion, ExpiresAt: until, Transport: set("native"), CreatedAt: set(timestamp(issued)), FirstLoginAt: set(timestamp(issued)), LastRenewedAt: set(timestamp(issued))})
 	if err != nil {
 		return Tokens{}, err
 	}
-	refreshRow, err := db.AppAuthRefreshTokens.Insert(private.AppAuthRefreshTokensInsert{SessionID: session.ID, TokenHash: digest(refresh), ExpiresAt: family})
+	refreshRow, err := db.AppAuthRefreshTokens.Insert(private.AppAuthRefreshTokensInsert{SessionID: session.ID, TokenHash: digest(refresh), ExpiresAt: family, CreatedAt: set(timestamp(issued))})
 	return Tokens{access, refresh, session.ExpiresAt, refreshRow.ExpiresAt, user.ID, session.ID}, err
 }
 
@@ -188,7 +187,7 @@ func (auth *Auth) signup(email, password string) (Tokens, error) {
 				return err
 			}
 		}
-		result, err = issue(db, user)
+		result, err = auth.issue(db, user)
 		return err
 	})
 	if err != nil {
@@ -223,7 +222,7 @@ func (auth *Auth) signin(email, password string) (Tokens, error) {
 		return Tokens{}, fail(401, "invalid_credentials")
 	}
 	var result Tokens
-	err = auth.db.Transaction(func(db *private.Database) error { var err error; result, err = issue(db, rows[0]); return err })
+	err = auth.db.Transaction(func(db *private.Database) error { var err error; result, err = auth.issue(db, rows[0]); return err })
 	return result, err
 }
 
@@ -245,21 +244,46 @@ func (auth *Auth) Session(authorization *string) (*server.Session, error) {
 		return nil, fail(401, "invalid_token")
 	}
 	row := rows[0]
-	ended, err := expired(row.ExpiresAt)
+	var result *server.Session
+	err = auth.db.Transaction(func(db *private.Database) error {
+		sessions := db.AppAuthSessions
+		locked, err := sessions.UpdateIf(private.AppAuthSessionsPrimaryKey{ID: row.ID}, orm.And(sessions.Columns().RevokedAt.IsNull(), sessions.Columns().TokenHash.Equal(digest(bearer))), private.AppAuthSessionsUpdate{RevokedAt: null[string]()})
+		if err != nil || locked == nil {
+			return err
+		}
+		checked := time.Now()
+		latest, err := latestRefresh(db, locked.ID)
+		if err != nil {
+			return err
+		}
+		_, err = sessionExpiry(checked, auth.policy, *locked, latest)
+		if err != nil {
+			if failure, ok := errors.AsType[*server.Error](err); !ok || failure.Status != 401 {
+				return err
+			}
+			_, err = sessions.Update(private.AppAuthSessionsPrimaryKey{ID: locked.ID}, private.AppAuthSessionsUpdate{RevokedAt: set(timestamp(checked))})
+			return err
+		}
+		ended, err := expiredAt(checked, locked.ExpiresAt)
+		if err != nil || ended {
+			return err
+		}
+		user, err := db.AppAuthUsers.FindByID(private.AppAuthUsersPrimaryKey{ID: locked.UserID})
+		if err != nil {
+			return err
+		}
+		if user != nil && user.DisabledAt == nil && user.SessionVersion == locked.UserSessionVersion {
+			result = &server.Session{ID: locked.ID, User: server.User{ID: user.ID, Email: user.Email}}
+		}
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	if ended {
+	if result == nil {
 		return nil, fail(401, "invalid_token")
 	}
-	user, err := auth.db.AppAuthUsers.FindByID(private.AppAuthUsersPrimaryKey{ID: row.UserID})
-	if err != nil {
-		return nil, err
-	}
-	if user == nil || user.DisabledAt != nil || user.SessionVersion != row.UserSessionVersion {
-		return nil, fail(401, "invalid_token")
-	}
-	return &server.Session{ID: row.ID, User: server.User{ID: user.ID, Email: user.Email}}, nil
+	return result, nil
 }
 
 func (auth *Auth) refresh(value string) (Tokens, error) {
@@ -287,6 +311,7 @@ func (auth *Auth) refresh(value string) (Tokens, error) {
 			revoked = true
 			return nil
 		}
+		checked := time.Now()
 		current, err := db.AppAuthRefreshTokens.FindByID(private.AppAuthRefreshTokensPrimaryKey{ID: candidate.ID})
 		if err != nil {
 			return err
@@ -295,23 +320,23 @@ func (auth *Auth) refresh(value string) (Tokens, error) {
 		if err != nil {
 			return err
 		}
-		invalid := current == nil || current.ConsumedAt != nil || user == nil || user.DisabledAt != nil || user.SessionVersion != session.UserSessionVersion
-		if current != nil {
-			ended, err := expired(current.ExpiresAt)
-			if err != nil {
-				return err
-			}
-			invalid = invalid || ended
-		}
-		revoke := func() error {
-			revoked = true
-			_, err := sessions.Update(private.AppAuthSessionsPrimaryKey{ID: session.ID}, private.AppAuthSessionsUpdate{RevokedAt: set(now())})
+		latest, err := latestRefresh(db, session.ID)
+		if err != nil {
 			return err
 		}
-		if invalid {
-			return revoke()
+		patch, family, err := refreshExpirations(checked, auth.policy, *session, current, latest, user)
+		revoke := func() error {
+			revoked = true
+			_, err := sessions.Update(private.AppAuthSessionsPrimaryKey{ID: session.ID}, private.AppAuthSessionsUpdate{RevokedAt: set(timestamp(checked))})
+			return err
 		}
-		consumed, err := db.AppAuthRefreshTokens.UpdateIf(private.AppAuthRefreshTokensPrimaryKey{ID: current.ID}, repo.Columns().ConsumedAt.IsNull(), private.AppAuthRefreshTokensUpdate{ConsumedAt: set(now())})
+		if err != nil {
+			if failure, ok := errors.AsType[*server.Error](err); ok && failure.Status == 401 {
+				return revoke()
+			}
+			return err
+		}
+		consumed, err := db.AppAuthRefreshTokens.UpdateIf(private.AppAuthRefreshTokensPrimaryKey{ID: current.ID}, repo.Columns().ConsumedAt.IsNull(), private.AppAuthRefreshTokensUpdate{ConsumedAt: set(timestamp(checked))})
 		if err != nil {
 			return err
 		}
@@ -326,14 +351,14 @@ func (auth *Auth) refresh(value string) (Tokens, error) {
 		if err != nil {
 			return err
 		}
-		until, _ := tokenExpirations(time.Now(), current.ExpiresAt)
-		updated, updateErr := sessions.Update(private.AppAuthSessionsPrimaryKey{ID: session.ID}, private.AppAuthSessionsUpdate{TokenHash: set(digest(access)), ExpiresAt: set(until)})
+		patch.TokenHash = set(digest(access))
+		updated, updateErr := sessions.Update(private.AppAuthSessionsPrimaryKey{ID: session.ID}, patch)
 		err = updateErr
 		if err != nil {
 			return err
 		}
-		_, err = db.AppAuthRefreshTokens.Insert(private.AppAuthRefreshTokensInsert{SessionID: session.ID, TokenHash: digest(refresh), ExpiresAt: current.ExpiresAt})
-		result = Tokens{access, refresh, updated.ExpiresAt, current.ExpiresAt, user.ID, session.ID}
+		_, err = db.AppAuthRefreshTokens.Insert(private.AppAuthRefreshTokensInsert{SessionID: session.ID, TokenHash: digest(refresh), ExpiresAt: family, CreatedAt: set(timestamp(checked))})
+		result = Tokens{access, refresh, updated.ExpiresAt, family, user.ID, session.ID}
 		return err
 	})
 	if err != nil {

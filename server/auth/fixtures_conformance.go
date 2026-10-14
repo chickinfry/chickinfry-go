@@ -63,7 +63,7 @@ func ConformanceAuthFixture(connection *database.Connection, mode, userID string
 		_, err := db.AppAuthUsers.Update(private.AppAuthUsersPrimaryKey{ID: userID}, private.AppAuthUsersUpdate{SessionVersion: set(int32(2))})
 		return err
 	case "cleanup":
-		cutoff := timestamp(time.Now().Add(-time.Hour))
+		cutoff := timestamp(time.Now().Add(-31 * 24 * time.Hour))
 		for range 40 {
 			value, err := token()
 			if err != nil {

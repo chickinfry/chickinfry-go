@@ -78,6 +78,32 @@ each store to one origin. Custom
 `SessionStore` implementations retain responsibility for serializing refreshes,
 saving successful results, and clearing only matching credentials.
 
+## Native server sessions
+
+Native server sessions use a 30-day idle timeout and no absolute lifetime by
+default. Successful refresh rotates credentials and renews the idle deadline;
+access requests and failed refreshes do not renew it. Access tokens expire after
+15 minutes or at the family deadline, whichever comes first.
+
+Validate a custom policy before registering the application, then pass the
+immutable value to each request's authentication runtime:
+
+```go
+policy, err := auth.NewSessionPolicy(2592000, 0)
+if err != nil {
+	panic(err)
+}
+authentication := auth.New(connection, hooks, policy)
+```
+
+Both inputs are integer seconds. Idle timeout must be between 3600 and 31536000;
+absolute lifetime accepts the same range or 0 to disable it. A shorter absolute
+lifetime is valid. Existing sessions use the current policy at their next check,
+so shortening a timeout or enabling a cap may require users to sign in again.
+Apply the additive authentication migration for `first_login_at` and
+`last_renewed_at` before upgrading the runtime. Valid legacy sessions transition
+on successful refresh; expired or revoked sessions remain rejected.
+
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE).
