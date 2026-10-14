@@ -841,7 +841,9 @@ func (repository AppAuthRefreshTokensRepository) Delete(key AppAuthRefreshTokens
 var appAuthSessionsTable = orm.Table{Name: "app_auth_sessions", Primary: []string{"id"}, Columns: []orm.Column{
 	{Name: "created_at", Kind: "timestamp", Nullable: false, Optional: true, Primary: false},
 	{Name: "expires_at", Kind: "timestamp", Nullable: false, Optional: false, Primary: false},
+	{Name: "first_login_at", Kind: "timestamp", Nullable: true, Optional: true, Primary: false},
 	{Name: "id", Kind: "id", Nullable: false, Optional: true, Primary: true},
+	{Name: "last_renewed_at", Kind: "timestamp", Nullable: true, Optional: true, Primary: false},
 	{Name: "revoked_at", Kind: "timestamp", Nullable: true, Optional: true, Primary: false},
 	{Name: "token_hash", Kind: "string", Nullable: false, Optional: false, Primary: false},
 	{Name: "transport", Kind: "string", Nullable: false, Optional: true, Primary: false},
@@ -852,7 +854,9 @@ var appAuthSessionsTable = orm.Table{Name: "app_auth_sessions", Primary: []strin
 type AppAuthSessionsRow struct {
 	CreatedAt          string  `json:"created_at"`
 	ExpiresAt          string  `json:"expires_at"`
+	FirstLoginAt       *string `json:"first_login_at"`
 	ID                 string  `json:"id"`
+	LastRenewedAt      *string `json:"last_renewed_at"`
 	RevokedAt          *string `json:"revoked_at"`
 	TokenHash          string  `json:"token_hash"`
 	Transport          string  `json:"transport"`
@@ -863,7 +867,9 @@ type AppAuthSessionsRow struct {
 type AppAuthSessionsInsert struct {
 	CreatedAt          orm.Optional[string]
 	ExpiresAt          string
+	FirstLoginAt       orm.Optional[string]
 	ID                 orm.Optional[string]
+	LastRenewedAt      orm.Optional[string]
 	RevokedAt          orm.Optional[string]
 	TokenHash          string
 	Transport          orm.Optional[string]
@@ -874,6 +880,8 @@ type AppAuthSessionsInsert struct {
 type AppAuthSessionsUpdate struct {
 	CreatedAt          orm.Optional[string]
 	ExpiresAt          orm.Optional[string]
+	FirstLoginAt       orm.Optional[string]
+	LastRenewedAt      orm.Optional[string]
 	RevokedAt          orm.Optional[string]
 	TokenHash          orm.Optional[string]
 	Transport          orm.Optional[string]
@@ -888,7 +896,9 @@ type AppAuthSessionsPrimaryKey struct {
 type AppAuthSessionsColumns struct {
 	CreatedAt          orm.Field[string]
 	ExpiresAt          orm.Field[string]
+	FirstLoginAt       orm.Field[string]
 	ID                 orm.Field[string]
+	LastRenewedAt      orm.Field[string]
 	RevokedAt          orm.Field[string]
 	TokenHash          orm.Field[string]
 	Transport          orm.Field[string]
@@ -902,7 +912,9 @@ func (repository AppAuthSessionsRepository) Columns() AppAuthSessionsColumns {
 	return AppAuthSessionsColumns{
 		CreatedAt:          orm.Field[string]{Name: "created_at"},
 		ExpiresAt:          orm.Field[string]{Name: "expires_at"},
+		FirstLoginAt:       orm.Field[string]{Name: "first_login_at"},
 		ID:                 orm.Field[string]{Name: "id"},
+		LastRenewedAt:      orm.Field[string]{Name: "last_renewed_at"},
 		RevokedAt:          orm.Field[string]{Name: "revoked_at"},
 		TokenHash:          orm.Field[string]{Name: "token_hash"},
 		Transport:          orm.Field[string]{Name: "transport"},
@@ -921,11 +933,25 @@ func (repository AppAuthSessionsRepository) Insert(input AppAuthSessionsInsert) 
 		}
 	}
 	values["expires_at"] = input.ExpiresAt
+	if input.FirstLoginAt.Set {
+		if input.FirstLoginAt.Null {
+			values["first_login_at"] = nil
+		} else {
+			values["first_login_at"] = input.FirstLoginAt.Value
+		}
+	}
 	if input.ID.Set {
 		if input.ID.Null {
 			values["id"] = nil
 		} else {
 			values["id"] = input.ID.Value
+		}
+	}
+	if input.LastRenewedAt.Set {
+		if input.LastRenewedAt.Null {
+			values["last_renewed_at"] = nil
+		} else {
+			values["last_renewed_at"] = input.LastRenewedAt.Value
 		}
 	}
 	if input.RevokedAt.Set {
@@ -996,6 +1022,20 @@ func (repository AppAuthSessionsRepository) Update(key AppAuthSessionsPrimaryKey
 			values["expires_at"] = patch.ExpiresAt.Value
 		}
 	}
+	if patch.FirstLoginAt.Set {
+		if patch.FirstLoginAt.Null {
+			values["first_login_at"] = nil
+		} else {
+			values["first_login_at"] = patch.FirstLoginAt.Value
+		}
+	}
+	if patch.LastRenewedAt.Set {
+		if patch.LastRenewedAt.Null {
+			values["last_renewed_at"] = nil
+		} else {
+			values["last_renewed_at"] = patch.LastRenewedAt.Value
+		}
+	}
 	if patch.RevokedAt.Set {
 		if patch.RevokedAt.Null {
 			values["revoked_at"] = nil
@@ -1052,6 +1092,20 @@ func (repository AppAuthSessionsRepository) UpdateIf(key AppAuthSessionsPrimaryK
 			values["expires_at"] = nil
 		} else {
 			values["expires_at"] = patch.ExpiresAt.Value
+		}
+	}
+	if patch.FirstLoginAt.Set {
+		if patch.FirstLoginAt.Null {
+			values["first_login_at"] = nil
+		} else {
+			values["first_login_at"] = patch.FirstLoginAt.Value
+		}
+	}
+	if patch.LastRenewedAt.Set {
+		if patch.LastRenewedAt.Null {
+			values["last_renewed_at"] = nil
+		} else {
+			values["last_renewed_at"] = patch.LastRenewedAt.Value
 		}
 	}
 	if patch.RevokedAt.Set {
