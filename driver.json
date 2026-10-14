@@ -1,7 +1,7 @@
 {
   "protocolVersion": 1,
   "driverVersion": "1",
-  "driverCommit": "8e4496712b2e0110582537835fa9923c9ed6cacd",
+  "driverCommit": "81208459daf71efa61cc25365ef6325b9714c064",
   "build": {
     "tool": "go",
     "entry": "conformance/driver/cmd/driver",

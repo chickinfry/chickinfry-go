@@ -105,6 +105,7 @@ func (s *server) dispatch(req request) *Error {
 		var transport *chik.HTTP
 		var store *storeBinding
 		var err error
+		var constructorNetworkRequests *int64
 		var fixture string
 		if req.Command == "client.copy" {
 			source := s.clients[a.SourceClientRef]
@@ -126,9 +127,10 @@ func (s *server) dispatch(req request) *Error {
 			if !hasOrigin || a.RequestTimeoutMS <= 0 || a.RequestTimeoutMS > int64((1<<63-1)/time.Millisecond) || (hasStore && hasBearer) {
 				return failure("driver", "invalid_args")
 			}
-			transport, err = chik.NewHTTPWithTimeout(a.Origin, time.Duration(a.RequestTimeoutMS)*time.Millisecond)
-			if err != nil {
-				return normalize(err)
+			var constructorErr *Error
+			transport, constructorNetworkRequests, constructorErr = newHTTP(a.Origin, time.Duration(a.RequestTimeoutMS)*time.Millisecond)
+			if constructorErr != nil {
+				return constructorErr
 			}
 		}
 		if a.BearerRef != "" {
@@ -154,7 +156,11 @@ func (s *server) dispatch(req request) *Error {
 			return normalize(err)
 		}
 		s.clients[a.ClientRef] = &clientBinding{http: transport, fixture: fixture, store: store}
-		s.reply(req.ID, map[string]any{"clientRef": a.ClientRef}, nil)
+		result := map[string]any{"clientRef": a.ClientRef}
+		if constructorNetworkRequests != nil {
+			result["constructorNetworkRequests"] = constructorNetworkRequests
+		}
+		s.reply(req.ID, result, nil)
 	case "session.store.create", "session.store.write", "session.store.read":
 		return s.sessionStore(req, a)
 	case "barrier.arm":
@@ -166,7 +172,7 @@ func (s *server) dispatch(req request) *Error {
 		if !validReference(a.CallID) || !strings.HasPrefix(a.CallID, "c:") || len(a.CallID) <= 2 || a.AfterSequence == nil {
 			return failure("driver", "invalid_args")
 		}
-		return failure("unimplemented", "unimplemented")
+		return s.observe(req, a)
 	case "client.call":
 		binding := s.clients[a.ClientRef]
 		if binding == nil {
@@ -230,7 +236,7 @@ func (s *server) dispatch(req request) *Error {
 					result.err = e
 				} else {
 					// Register credential outputs even when the command deadline has expired.
-					result.output = map[string]any{"output": clean, "credentialRefs": refs, "httpStatus": nil}
+					result.output = map[string]any{"output": clean, "credentialRefs": refs, "httpStatus": s.observedStatus(req.ID)}
 				}
 			}
 		})
@@ -251,7 +257,7 @@ func (s *server) dispatch(req request) *Error {
 				return
 			}
 			if result.err != nil {
-				s.reply(req.ID, nil, normalize(result.err))
+				s.reply(req.ID, nil, s.observedError(req.ID, result.err))
 				return
 			}
 			// The public SDK does not expose successful response status codes.

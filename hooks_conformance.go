@@ -19,15 +19,25 @@ import (
 // Callback sinks must not reenter the SDK. Barrier callbacks must honor context cancellation.
 type ConformanceHooks struct {
 	Observe        func(ConformanceTransportEvent)
+	Result         func(ConformanceResultEvent)
 	SessionTrace   func(ConformanceSessionEvent)
 	Barrier        func(context.Context, ConformanceBarrierEvent) error
 	CredentialRefs map[string]string
 }
 
+// ConformanceResultEvent reports measured SDK metadata without user-visible error text.
+// Nil fields remain unavailable; NetworkRequests counts actual network entry points.
+type ConformanceResultEvent struct {
+	HTTPStatus          *int
+	RawTransportDetails *bool
+	OutcomeUnknown      *bool
+	NetworkRequests     int64
+}
+
 // ConformanceTransportEvent records actual transport measurements for one SDK call.
 // LibraryRetainedBytes is transient: the tagged HTTP/1 transport fixes ReadBufferSize
 // at 4096. net/http/transport.go creates its reader with bufio.NewReaderSize using
-// that size (Go 1.27.1: lines 287-290, 2120; https://go.dev/src/net/http/transport.go).
+// that size (Go 1.26.9: lines 322-326, 1991; Go 1.27.2: lines 329-333, 2120).
 // RetainedBytes and PeakRetainedBytes count the SDK-owned cumulative body buffer.
 // Measurable=false requires an unimplemented result; nullable library counts are not zero estimates.
 type ConformanceTransportEvent struct {
@@ -76,14 +86,17 @@ type conformanceKey struct{}
 type conformanceExchangeKey struct{}
 
 type conformanceState struct {
-	hooks          ConformanceHooks
-	callID, origin string
-	started        time.Time
-	session        bool
-	peak, received int64
-	last, final    *conformanceExchange
-	flight         *refreshFlight
-	completed      bool
+	hooks                ConformanceHooks
+	callID, origin       string
+	started              time.Time
+	session              bool
+	peak, received       int64
+	last, final          *conformanceExchange
+	flight               *refreshFlight
+	completed            bool
+	networkRequests      atomic.Int64
+	retentionUnavailable bool
+	finalUnobserved      bool
 }
 
 type conformanceExchange struct {
@@ -97,6 +110,7 @@ type conformanceExchange struct {
 	ctx                                                            context.Context
 	sent                                                           chan struct{}
 	stopping, limited, closed, headersPublished, terminalPublished bool
+	normalErrorEnvelope, refreshRejected                           bool
 }
 
 var conformanceEmission sync.Mutex
@@ -146,7 +160,7 @@ func conformanceBegin(ctx context.Context, origin string, session bool) (context
 		if state.completed {
 			return
 		}
-		if state.final == nil && state.last != nil {
+		if state.final == nil && state.last != nil && !state.finalUnobserved {
 			state.selectFinalLocked(state.last)
 		}
 		if state.final != nil {
@@ -200,10 +214,17 @@ func (state *conformanceState) emitLocked(exchange *conformanceExchange, phase s
 	}
 	state.peak = max(state.peak, held)
 	event := ConformanceTransportEvent{Sequence: conformanceSequence.Add(1), CallID: state.callID, ElapsedMs: float64(time.Since(state.started)) / float64(time.Millisecond), Phase: phase, RetainedBytes: held, RuntimeRetainedBytes: held, PeakRetainedBytes: state.peak, ReadBytes: state.received}
+	if exchange == nil && state.last == nil {
+		// No HTTP exchange was opened: the SDK stopped before transport entry.
+		event.Measurable = true
+		event.LibraryRetainedBytes = new(int64(0))
+		event.TotalHeldBytes = new(held)
+		event.FramingBytes = new(int64(0))
+	}
 	if exchange != nil {
 		event.HTTPStatus = exchange.status
 		if !exchange.closed {
-			event.ReadBytes += exchange.receivedBodyLocked()
+			event.ReadBytes += exchange.delivered
 		}
 		if exchange.conn != nil {
 			body, framing, valid := exchange.conn.snapshot()
@@ -216,8 +237,36 @@ func (state *conformanceState) emitLocked(exchange *conformanceExchange, phase s
 			}
 		}
 	}
+	if state.retentionUnavailable {
+		event.Measurable = false
+		event.TotalHeldBytes = nil
+	}
 	state.hooks.Observe(event)
 }
+
+func conformanceDecode(ctx context.Context) {
+	if state := conformanceStateFrom(ctx); state != nil {
+		conformanceEmission.Lock()
+		state.retentionUnavailable = true
+		conformanceEmission.Unlock()
+	}
+}
+
+func conformanceRefreshFailure(ctx context.Context) {
+	if state := conformanceStateFrom(ctx); state != nil {
+		conformanceEmission.Lock()
+		state.finalUnobserved = state.final == nil && state.last != nil && state.last.operation != "auth.refresh"
+		conformanceEmission.Unlock()
+	}
+}
+func conformanceRejection(ctx context.Context, refreshRejected bool) {
+	if exchange := conformanceExchangeFrom(ctx); exchange != nil {
+		conformanceEmission.Lock()
+		exchange.normalErrorEnvelope, exchange.refreshRejected = true, refreshRejected
+		conformanceEmission.Unlock()
+	}
+}
+
 func (exchange *conformanceExchange) stopLocked(limit bool) {
 	if exchange.stopping {
 		return
@@ -432,8 +481,11 @@ func conformanceRequest(ctx context.Context, client *http.Client, operation stri
 	watchDone := make(chan struct{})
 	watch := context.AfterFunc(requestCtx, func() { defer close(watchDone); conformanceStop(requestCtx, false) })
 	copy := *client
-	if state.hooks.Observe != nil || state.hooks.Barrier != nil || state.hooks.SessionTrace != nil {
+	if state.hooks.Observe != nil || state.hooks.Result != nil || state.hooks.Barrier != nil || state.hooks.SessionTrace != nil {
 		transport, ok := client.Transport.(*http.Transport)
+		if observed, wrapped := client.Transport.(*conformanceNetworkTransport); wrapped {
+			transport, ok = observed.transport, true
+		}
 		if client.Transport == nil {
 			transport, ok = http.DefaultTransport.(*http.Transport)
 		}
@@ -469,6 +521,9 @@ func conformanceRequest(ctx context.Context, client *http.Client, operation stri
 				return wrapped, nil
 			}
 			copy.Transport = owned
+			if observed, wrapped := client.Transport.(*conformanceNetworkTransport); wrapped {
+				copy.Transport = &conformanceNetworkTransport{transport: owned, counter: observed.counter}
+			}
 		}
 	}
 	return requestCtx, &copy, func(result error) {
@@ -515,7 +570,7 @@ func conformanceRead(ctx context.Context, n, held int) bool {
 	exchange.delivered += int64(n)
 	exchange.held = int64(held)
 	exchange.call.peak = max(exchange.call.peak, exchange.held)
-	overflow := exchange.receivedBodyLocked() > 1<<20
+	overflow := exchange.delivered > 1<<20
 	if overflow {
 		exchange.call.selectFinalLocked(exchange)
 	}
@@ -563,7 +618,7 @@ func conformanceReaderClosed(ctx context.Context) {
 	if exchange.closed {
 		return
 	}
-	exchange.call.received += exchange.receivedBodyLocked()
+	exchange.call.received += exchange.delivered
 	exchange.closed = true
 	exchange.terminalLocked()
 }

@@ -22,6 +22,10 @@ func conformanceRequest(ctx context.Context, client *http.Client, _ string, _ in
 	return ctx, client, func(error) {}
 }
 func conformanceHeaders(context.Context, *http.Response) {}
+func conformanceResult(context.Context, error)           {}
+func conformanceDecode(context.Context)                  {}
+func conformanceRefreshFailure(context.Context)          {}
+func conformanceRejection(context.Context, bool)         {}
 func conformanceDo(client *http.Client, request *http.Request) (*http.Response, error) {
 	return client.Do(request)
 }

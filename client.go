@@ -188,6 +188,10 @@ func NewHTTP(origin string) (*HTTP, error) {
 
 // NewHTTPWithTimeout builds a transport applying a per-request timeout.
 func NewHTTPWithTimeout(origin string, timeout time.Duration) (*HTTP, error) {
+	return newHTTPWithTimeout(origin, timeout, nil)
+}
+
+func newHTTPWithTimeout(origin string, timeout time.Duration, observe func(*http.Transport) http.RoundTripper) (*HTTP, error) {
 	if timeout <= 0 {
 		return nil, errors.New("operation timeout must be positive")
 	}
@@ -213,13 +217,17 @@ func NewHTTPWithTimeout(origin string, timeout time.Duration) (*HTTP, error) {
 	clientTransport := standardTransport.Clone()
 	clientTransport.Protocols = new(http.Protocols)
 	clientTransport.Protocols.SetHTTP1(true)
+	var roundTripper http.RoundTripper = clientTransport
+	if observe != nil {
+		roundTripper = observe(clientTransport)
+	}
 	return &HTTP{
 		// Serialize through url.URL so IPv6 zone identifiers keep their
 		// canonical percent encoding and the origin still round-trips.
 		origin:    (&url.URL{Scheme: parsed.Scheme, Host: parsed.Host}).String(),
 		refreshes: new(refreshFlights),
 		client: &http.Client{
-			Transport:     clientTransport,
+			Transport:     roundTripper,
 			Timeout:       timeout,
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 		},
@@ -230,9 +238,10 @@ var operationName = regexp.MustCompile(`^[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*$`)
 var errorCode = regexp.MustCompile(`^[a-z_]+$`)
 
 // Invoke calls a single operation with POST and fills output from the response.
-func (transport *HTTP) Invoke(ctx context.Context, operation string, input any, output any) error {
+func (transport *HTTP) Invoke(ctx context.Context, operation string, input any, output any) (result error) {
 	ctx, finish, hookErr := conformanceBegin(ctx, transport.origin, transport.session != nil)
 	defer finish()
+	defer func() { conformanceResult(ctx, result) }()
 	if hookErr != nil {
 		return hookErr
 	}
@@ -253,6 +262,7 @@ func (transport *HTTP) Invoke(ctx context.Context, operation string, input any, 
 	}
 	credentials, err = transport.refreshSession(ctx, credentials)
 	if err != nil {
+		conformanceRefreshFailure(ctx)
 		return err
 	}
 	return transport.invokeOnce(ctx, operation, input, output, credentials.AccessToken, nil)
@@ -473,15 +483,18 @@ func (transport *HTTP) invokeOnce(ctx context.Context, operation string, input a
 			Error string `json:"error"`
 		}{}
 		code := "invalid_response"
+		conformanceDecode(requestCtx)
 		if json.Unmarshal(data, &failure) == nil && errorCode.MatchString(failure.Error) {
 			code = failure.Error
 			// Other statuses do not guarantee that a refresh token was left unconsumed.
 			if classified != nil && response.StatusCode == http.StatusUnauthorized {
 				*classified = true
 			}
+			conformanceRejection(requestCtx, response.StatusCode == http.StatusUnauthorized)
 		}
 		return &OperationError{Code: code, Status: response.StatusCode}
 	}
+	conformanceDecode(requestCtx)
 	if err := json.Unmarshal(data, output); err != nil {
 		return errors.New("invalid operation response")
 	}

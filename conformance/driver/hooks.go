@@ -5,12 +5,24 @@ package driver
 import (
 	"context"
 	"slices"
+	"time"
 
 	chik "github.com/chickinfry/chickinfry-go"
 )
 
 func supportedCapabilities() []string {
-	return append(append([]string{}, capabilities...), "barrier", "session.store", "session.trace")
+	return append(append([]string{}, capabilities...), "barrier", "session.store", "session.trace", "client.transport")
+}
+func supportsTransport() bool { return true }
+func newHTTP(origin string, timeout time.Duration) (*chik.HTTP, *int64, *Error) {
+	transport, observed, err := chik.ConformanceNewHTTPWithTimeout(origin, timeout)
+	if err != nil {
+		e := normalize(err)
+		e.RawTransportDetails, e.OutcomeUnknown = observed.RawTransportDetails, observed.OutcomeUnknown
+		e.ConstructorNetworkRequests = new(observed.NetworkRequests)
+		return nil, nil, e
+	}
+	return transport, new(observed.NetworkRequests), nil
 }
 func supportsSession() bool                  { return true }
 func (store *storeBinding) revision() uint64 { return chik.ConformanceStoreRevision(store.memory) }
@@ -19,6 +31,13 @@ func supportsBarrierPoint(point string) bool {
 }
 
 func attachHooks(s *server, ctx, control context.Context, callID, caseID string) context.Context {
+	s.observeMu.Lock()
+	if s.observations == nil {
+		s.observations = map[string]*callObservations{}
+	}
+	observations := &callObservations{events: []transportEvent{}, complete: true}
+	s.observations[callID] = observations
+	s.observeMu.Unlock()
 	s.credentials.mu.Lock()
 	refs := map[string]string{}
 	for ref, value := range s.credentials.values {
@@ -28,6 +47,25 @@ func attachHooks(s *server, ctx, control context.Context, callID, caseID string)
 	}
 	s.credentials.mu.Unlock()
 	return chik.WithConformanceHooks(ctx, callID, chik.ConformanceHooks{
+		Observe: func(event chik.ConformanceTransportEvent) {
+			s.observeMu.Lock()
+			defer s.observeMu.Unlock()
+			observations.complete = observations.complete && event.Measurable
+			projected := transportEvent{
+				Sequence: event.Sequence, CallID: event.CallID, ElapsedMS: event.ElapsedMs,
+				Phase: event.Phase, HTTPStatus: event.HTTPStatus, ReadBytes: event.ReadBytes,
+			}
+			if event.Measurable {
+				projected.RetainedBytes, projected.PeakRetainedBytes = new(event.RetainedBytes), new(event.PeakRetainedBytes)
+			}
+			observations.events = append(observations.events, projected)
+			s.throughSequence = event.Sequence
+		},
+		Result: func(event chik.ConformanceResultEvent) {
+			s.observeMu.Lock()
+			defer s.observeMu.Unlock()
+			observations.status, observations.raw, observations.unknown = event.HTTPStatus, event.RawTransportDetails, event.OutcomeUnknown
+		},
 		CredentialRefs: refs,
 		SessionTrace: func(event chik.ConformanceSessionEvent) {
 			if event.Phase != "clear" {

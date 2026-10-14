@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 )
 
 // conformanceConn counts response payload separately from HTTP framing without
@@ -28,10 +29,12 @@ type conformanceConn struct {
 	requestHeaderMatch              int
 	requestHeadersDone, requestSent bool
 	onRequestSent                   func()
+	requestBytes                    atomic.Int64
 }
 
 func (connection *conformanceConn) Write(buffer []byte) (int, error) {
 	n, err := connection.Conn.Write(buffer)
+	connection.requestBytes.Add(int64(n))
 	if connection.onRequestSent == nil || connection.requestSent {
 		return n, err
 	}

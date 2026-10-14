@@ -35,7 +35,7 @@ the generated packages are already linked into the executable.
 ## Protocol and observations
 
 Protocol version 1 and driver version `1` advertise `client.create`, `client.copy`,
-`client.call`, and (in tagged builds) `barrier`, `session.store`, and `session.trace`.
+`client.call`, and (in tagged builds) `barrier`, `session.store`, and `session.trace` and `client.transport`.
 A handshake may include an exact Go SDK/native
 target. Each call runs independently, while stdout writes are serialized by line.
 The driver adds no SDK refresh flight, request retry, refresh lock or credential
@@ -62,24 +62,52 @@ return these actual attempts, including an observed empty list when no clear ran
 unmeasurable clear observations return `unimplemented`. Session capabilities are
 advertised together only in builds with both runtime observations.
 
-`client.transport` is not advertised. `client.observe` validates the revision-3
-`callId` and nonnegative integer `afterSequence` arguments, then returns
-`unimplemented`; it emits no fabricated snapshot. The runtime's existing hooks
-measure loopback HTTP only: HTTPS has no connection/body-buffer measurements,
-and the constructor and user-visible errors do not expose
-`constructorNetworkRequests` or `rawTransportDetails`. Consequently the driver
-cannot provide all required fields, including a complete eight-field transport
-snapshot, from actual observations. These missing observations also prevent
-C-02 and SDK-error-dependent cases from establishing conformance. No partial
-transport capability or hard-coded zero/false counters are published.
+Tagged builds advertise `client.transport` and implement `client.observe`.
+Snapshots return exactly `callId`, `throughSequence`, `complete` and `events`;
+each event projects the runtime's eight protocol fields, with no driver byte
+accounting, outcome comparison, retry or refresh merging. Observations remain
+available while the call is pending and after its SDK result. Unknown call IDs
+and future watermarks are rejected; empty complete watermark intervals are valid.
+The conformance peer uses loopback HTTP. Unsupported wire shapes or HTTPS buffer
+measurements remain unavailable and cannot establish conformance.
+
+The tagged constructor wraps the cloned SDK transport's real RoundTrip,
+DialContext, optional DialTLSContext and DNS entry callbacks. Its counter delta
+from constructor entry to return supplies `constructorNetworkRequests`, including
+constructor rejections. The same counter records later actual call entries.
+The SDK's single client.Do path uses this transport; there is no separate default
+client, socket or resolver path. A regression check guards those bypasses.
+User-visible raw-error exposure and resolvable outcome/status observations come
+from the runtime result hook; unavailable metadata remains null. No raw exception
+text, body or header is emitted.
+
+The HTTP/1.1 response path fixes the sole payload I/O buffer at 4096 bytes and
+disables compression and HTTP/2. The fixed buffer is excluded as transient
+(F=4096, below 64 KiB). Source pins: Go 1.26.9 `net/http/transport.go:322-326,1991`
+and Go 1.27.2 `net/http/transport.go:329-333,2120` select and construct the
+bufio reader; both versions' `bufio/bufio.go:50-59` allocate exactly
+max(ReadBufferSize,16). `net/http/internal/chunked.go:27-35` reuses that reader,
+so content-length and chunked responses do not gain another payload buffer.
+The runtime counts its cumulative body buffer and the actual socket payload
+separately. Its test-only parser holds HTTP/chunk framing, not a body copy.
+These bounds cover the fixed loopback peer; HTTPS/TLS buffers remain unmeasured.
+The complete capability covers C-04/C-05's oversized 3xx variants, which stop
+before JSON decoding (guarded by a decoder sentinel test). Other calls that
+enter JSON decoding cannot establish a complete retained-byte peak:
+`encoding/json/stream.go:284-288` copies RawMessage bytes with append and the
+fixed generated SDK's `client.go:28-45` creates a map of RawMessage fields in
+UnmarshalJSON. Decoder temporary copies are not observable from this runtime.
+After decoder entry, snapshots preserve `complete:false` and null retained/peak
+fields, including subsequent exchanges in the same call. No guessed byte count
+or driver reserialization fills this gap. Generator instrumentation is separate
+work; ordinary decoded calls therefore remain incomplete.
 
 Generated input models serialize valid declared fields, and the input adapter
 preserves absent/null fields which Go string structs cannot represent. Generated
 output decoders validate complete responses. Time strings stay strings. SDK error
 codes/statuses are taken from structured `OperationError` values; other metadata
-remains unavailable, with no string parsing or invented status/code. SDK
-`outcomeUnknown` is null because the public runtime does not expose that
-observation; HTTP status does not resolve refresh-token consumption. Command
+remains unavailable, with no string parsing or invented status/code. Tagged runtime observations report `outcomeUnknown` only where the runtime can
+resolve it; HTTP status alone does not resolve refresh-token consumption. Command
 deadline errors also leave `outcomeUnknown` null because the runtime does not
 expose the outcome at the deadline.
 

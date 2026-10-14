@@ -2,7 +2,21 @@
 
 package driver
 
-import "context"
+import (
+	"context"
+	"time"
+
+	chik "github.com/chickinfry/chickinfry-go"
+)
+
+func supportsTransport() bool { return false }
+func newHTTP(origin string, timeout time.Duration) (*chik.HTTP, *int64, *Error) {
+	transport, err := chik.NewHTTPWithTimeout(origin, timeout)
+	if err != nil {
+		return nil, nil, normalize(err)
+	}
+	return transport, nil, nil
+}
 
 func supportedCapabilities() []string  { return capabilities }
 func supportsSession() bool            { return false }

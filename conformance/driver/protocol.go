@@ -26,10 +26,12 @@ type Call func(context.Context, *chik.HTTP, string, json.RawMessage) (any, error
 
 // Error is the sanitized protocol error; unavailable SDK metadata remains null.
 type Error struct {
-	Kind           string  `json:"kind"`
-	Code           *string `json:"code"`
-	HTTPStatus     *int    `json:"httpStatus"`
-	OutcomeUnknown *bool   `json:"outcomeUnknown"`
+	Kind                       string  `json:"kind"`
+	Code                       *string `json:"code"`
+	HTTPStatus                 *int    `json:"httpStatus"`
+	OutcomeUnknown             *bool   `json:"outcomeUnknown"`
+	RawTransportDetails        *bool   `json:"rawTransportDetails,omitempty"`
+	ConstructorNetworkRequests *int64  `json:"constructorNetworkRequests,omitempty"`
 }
 
 func (e *Error) Error() string { return "conformance driver error" }
@@ -190,22 +192,25 @@ type clientBinding struct {
 }
 
 type server struct {
-	writer      io.Writer
-	writeMu     sync.Mutex
-	writeErr    error
-	ctx         context.Context
-	cancel      context.CancelFunc
-	workers     sync.WaitGroup
-	call        Call
-	credentials *credentials
-	clients     map[string]*clientBinding
-	stores      map[string]*storeBinding
-	caseID      string
-	sessionMu   sync.Mutex
-	barrierMu   sync.Mutex
-	barriers    map[string]*barrier
-	pending     map[string]*barrierPending
-	nextID      atomic.Uint64
+	writer          io.Writer
+	writeMu         sync.Mutex
+	writeErr        error
+	ctx             context.Context
+	cancel          context.CancelFunc
+	workers         sync.WaitGroup
+	call            Call
+	credentials     *credentials
+	clients         map[string]*clientBinding
+	stores          map[string]*storeBinding
+	caseID          string
+	sessionMu       sync.Mutex
+	barrierMu       sync.Mutex
+	barriers        map[string]*barrier
+	pending         map[string]*barrierPending
+	nextID          atomic.Uint64
+	observeMu       sync.Mutex
+	observations    map[string]*callObservations
+	throughSequence uint64
 }
 
 func (s *server) reply(id string, result any, e *Error) {

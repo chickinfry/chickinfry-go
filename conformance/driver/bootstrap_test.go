@@ -308,7 +308,11 @@ func TestRevision3FieldsRejectInvalidValues(t *testing.T) {
 		}
 	}
 	results, err := execute(t, hello+command("c:observe", "client.observe", map[string]any{"callId": "c:call", "afterSequence": 0}), "", nil)
-	if err != nil || results[1].Error == nil || results[1].Error.Kind != "unimplemented" {
+	want := "unimplemented"
+	if supportsTransport() {
+		want = "driver"
+	}
+	if err != nil || results[1].Error == nil || results[1].Error.Kind != want {
 		t.Fatal("unavailable transport observations fabricated")
 	}
 }

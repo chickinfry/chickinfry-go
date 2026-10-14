@@ -53,7 +53,15 @@ func TestConformanceTransportPhasesAndRealBuffers(t *testing.T) {
 			}
 			var events []ConformanceTransportEvent
 			ctx := WithConformanceHooks(t.Context(), "call:transport", ConformanceHooks{Observe: func(event ConformanceTransportEvent) { events = append(events, event) }})
-			err = transport.Invoke(ctx, "catalog.create", map[string]string{}, &struct{}{})
+			var decoded bool
+			var output any = &struct{}{}
+			if test.status == 307 {
+				output = &decodeSentinel{called: &decoded}
+			}
+			err = transport.Invoke(ctx, "catalog.create", map[string]string{}, output)
+			if decoded {
+				t.Fatal("oversized redirect reached JSON decoding")
+			}
 			if test.status == 200 && test.size == limit {
 				if err != nil {
 					t.Fatal(err)
@@ -75,10 +83,15 @@ func TestConformanceTransportPhasesAndRealBuffers(t *testing.T) {
 				}
 				sequence = event.Sequence
 				elapsed = event.ElapsedMs
-				if !event.Measurable || event.LibraryRetainedBytes == nil || event.TotalHeldBytes == nil || event.FramingBytes == nil {
+				decoderUnavailable := test.status == 200 && test.size == limit && (event.Phase == "reader-closed" || event.Phase == "completed")
+				if decoderUnavailable {
+					if event.Measurable || event.TotalHeldBytes != nil {
+						t.Fatal("unmeasured decoder copies were presented as complete")
+					}
+				} else if !event.Measurable || event.LibraryRetainedBytes == nil || event.TotalHeldBytes == nil || event.FramingBytes == nil {
 					t.Fatalf("missing underlying measurements: %+v", event)
 				}
-				if event.RetainedBytes > limit || event.PeakRetainedBytes > limit || *event.LibraryRetainedBytes > conformanceReadBuffer || *event.TotalHeldBytes != event.RuntimeRetainedBytes+*event.LibraryRetainedBytes {
+				if event.RetainedBytes > limit || event.PeakRetainedBytes > limit || *event.LibraryRetainedBytes > conformanceReadBuffer || !decoderUnavailable && *event.TotalHeldBytes != event.RuntimeRetainedBytes+*event.LibraryRetainedBytes {
 					t.Fatalf("wrong buffers: %+v", event)
 				}
 				received = max(received, event.ReadBytes)
@@ -125,6 +138,13 @@ func TestConformanceTransportPhasesAndRealBuffers(t *testing.T) {
 			}
 		})
 	}
+}
+
+type decodeSentinel struct{ called *bool }
+
+func (sentinel *decodeSentinel) UnmarshalJSON([]byte) error {
+	*sentinel.called = true
+	return errors.New("unexpected redirect decoder entry")
 }
 
 func TestConformanceCancellationPhases(t *testing.T) {
@@ -569,6 +589,78 @@ type cachedClearStore struct{ *refreshStore }
 
 func (store *cachedClearStore) Clear(context.Context, SessionCredentials) error { return nil }
 
+func TestConformanceResponseLimitPerExchange(t *testing.T) {
+	const limit = 1 << 20
+	for _, retrySize := range []int{limit - 1, limit + 1} {
+		t.Run(strconv.Itoa(retrySize), func(t *testing.T) {
+			store := newRefreshStore()
+			rotated := newRefreshStore().Credentials()
+			rotated.AccessToken = strings.Repeat("c", 43)
+			refresh := httptest.NewRecorder()
+			writeSessionCredentials(t, refresh, rotated)
+			refreshBody := refresh.Body
+			original := `{"error":"invalid_token"}`
+			original += strings.Repeat(" ", limit-1-len(original))
+			retry := "{}" + strings.Repeat(" ", retrySize-2)
+			var exchanges atomic.Int64
+			server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+				exchanges.Add(1)
+				body, status := original, http.StatusUnauthorized
+				if request.URL.Path == "/auth.refresh" {
+					body, status = refreshBody.String(), http.StatusOK
+				} else if request.Header.Get("Authorization") == "Bearer "+rotated.AccessToken {
+					body, status = retry, http.StatusOK
+				}
+				response.Header().Set("Content-Length", strconv.Itoa(len(body)))
+				response.WriteHeader(status)
+				io.WriteString(response, body)
+			}))
+			defer server.Close()
+			transport, err := NewHTTP(server.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			signed, err := transport.WithSession(store)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var events []ConformanceTransportEvent
+			ctx := WithConformanceHooks(t.Context(), "call:exchange-limit", ConformanceHooks{Observe: func(event ConformanceTransportEvent) { events = append(events, event) }})
+			err = signed.Invoke(ctx, "catalog.create", map[string]string{}, &struct{}{})
+			overflow := retrySize > limit
+			if (!overflow && err != nil) || (overflow && (err == nil || err.Error() != "operation response is too large")) {
+				t.Fatalf("retrySize=%d error=%v", retrySize, err)
+			}
+			if exchanges.Load() != 3 || len(events) == 0 {
+				t.Fatalf("exchanges=%d events=%d; want original, refresh and retry", exchanges.Load(), len(events))
+			}
+			var received, peak int64
+			var limits int
+			for _, event := range events {
+				if event.ReadBytes < received || event.PeakRetainedBytes < peak {
+					t.Fatalf("cumulative observation decreased: %+v", event)
+				}
+				received, peak = event.ReadBytes, event.PeakRetainedBytes
+				if event.Phase == "limit" {
+					limits++
+					if !overflow || event.ReadBytes != int64(len(original)+refreshBody.Len()+limit+1) || event.HTTPStatus == nil || *event.HTTPStatus != http.StatusOK {
+						t.Fatalf("limit before a single exchange overflowed: %+v", event)
+					}
+				}
+			}
+			wantLimits := 0
+			if overflow {
+				wantLimits = 1
+			}
+			wantRead := int64(len(original) + refreshBody.Len() + retrySize)
+			wantPeak := int64(min(retrySize, limit))
+			if limits != wantLimits || received != wantRead || peak != wantPeak || events[len(events)-1].Phase != "completed" {
+				t.Fatalf("limits=%d readBytes=%d peak=%d; want %d, %d, %d and completion", limits, received, peak, wantLimits, wantRead, wantPeak)
+			}
+		})
+	}
+}
+
 func TestConformanceAutoRefreshExchangeProjection(t *testing.T) {
 	store := newRefreshStore()
 	rotated := newRefreshStore().Credentials()
@@ -606,7 +698,7 @@ func TestConformanceAutoRefreshExchangeProjection(t *testing.T) {
 	var sequence uint64
 	var elapsed float64
 	for _, event := range events {
-		if !event.Measurable || event.ReadBytes < received || event.PeakRetainedBytes < peak || event.Sequence <= sequence || event.ElapsedMs < elapsed {
+		if event.ReadBytes < received || event.PeakRetainedBytes < peak || event.Sequence <= sequence || event.ElapsedMs < elapsed || !event.Measurable && event.TotalHeldBytes != nil {
 			t.Fatalf("exchange observation=%+v", event)
 		}
 		received = event.ReadBytes
@@ -624,6 +716,9 @@ func TestConformanceAutoRefreshExchangeProjection(t *testing.T) {
 	}
 	if phases["headers"] != 1 || phases["reader-closed"] != 1 || phases["completed"] != 1 || !statuses[401] || !statuses[200] || bodyBytes <= 2 {
 		t.Fatalf("projection phases=%v statuses=%v bytes=%d", phases, statuses, bodyBytes)
+	}
+	if events[len(events)-1].Measurable {
+		t.Fatal("refresh decoder copies were hidden")
 	}
 }
 
