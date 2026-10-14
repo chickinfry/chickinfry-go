@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strconv"
 
 	"github.com/chickinfry/chickinfry-go/server/host"
 )
@@ -20,12 +21,25 @@ func (err *Error) Error() string { return err.Code }
 
 // Request contains the transport metadata and validated request handle.
 type Request struct {
-	RID    int64           `json:"rid"`
-	Method string          `json:"method"`
-	Path   string          `json:"path"`
-	Body   json.RawMessage `json:"body"`
-	call   func(string, any) ([]byte, error)
+	Authorization *string         `json:"authorization"`
+	RID           int64           `json:"rid"`
+	Method        string          `json:"method"`
+	Path          string          `json:"path"`
+	Body          json.RawMessage `json:"body"`
+	call          func(string, any) ([]byte, error)
 }
+
+// User contains public authenticated identity values.
+type User struct{ ID, Email string }
+
+// Session contains public session identity, never credentials.
+type Session struct {
+	ID   string
+	User User
+}
+
+// Public returns request metadata without authentication credentials.
+func (request Request) Public() Request { request.Authorization = nil; return request }
 
 // Handler is the generated dispatcher installed by the customer entry.
 type Handler func(Request) (any, error)
@@ -97,7 +111,7 @@ func Output() (*byte, int32) {
 // DecodeInput validates all required string fields before business dispatch.
 func DecodeInput(data []byte, fields []string, value any) error {
 	var object map[string]json.RawMessage
-	if host.Decode(data, &object) != nil || object == nil {
+	if host.Decode(data, &object) != nil || object == nil || !validUnicodeJSON(data) {
 		return &Error{400, "invalid_input"}
 	}
 	for _, field := range fields {
@@ -141,4 +155,48 @@ func (request Request) Log(level, message string) error {
 		return err
 	}
 	return host.Envelope(frame, "", nil)
+}
+
+// encoding/json replaces unpaired surrogate escapes; reject them before dispatch.
+func validUnicodeJSON(data []byte) bool {
+	inside := false
+	for i := 0; i < len(data); i++ {
+		if data[i] == '"' {
+			inside = !inside
+			continue
+		}
+		if !inside || data[i] != '\\' {
+			continue
+		}
+		i++
+		if i >= len(data) {
+			return false
+		}
+		if data[i] != 'u' {
+			continue
+		}
+		if i+4 >= len(data) {
+			return false
+		}
+		value, err := strconv.ParseUint(string(data[i+1:i+5]), 16, 16)
+		if err != nil {
+			return false
+		}
+		i += 4
+		if value >= 0xdc00 && value <= 0xdfff {
+			return false
+		}
+		if value < 0xd800 || value > 0xdbff {
+			continue
+		}
+		if i+6 >= len(data) || data[i+1] != '\\' || data[i+2] != 'u' {
+			return false
+		}
+		low, err := strconv.ParseUint(string(data[i+3:i+7]), 16, 16)
+		if err != nil || low < 0xdc00 || low > 0xdfff {
+			return false
+		}
+		i += 6
+	}
+	return true
 }

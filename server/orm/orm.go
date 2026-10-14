@@ -379,6 +379,15 @@ func (repository Repository) Find(options FindMany) ([]json.RawMessage, error) {
 
 // Update changes mutable columns on exactly one primary-key-addressed row.
 func (repository Repository) Update(key, patch map[string]any) (json.RawMessage, error) {
+	return repository.update(key, Filter{}, patch, false)
+}
+
+// UpdateIf returns nil when the addressed row no longer matches the condition.
+func (repository Repository) UpdateIf(key map[string]any, condition Filter, patch map[string]any) (json.RawMessage, error) {
+	return repository.update(key, condition, patch, true)
+}
+
+func (repository Repository) update(key map[string]any, condition Filter, patch map[string]any, conditional bool) (json.RawMessage, error) {
 	table, err := quote(repository.Table.Name)
 	if err != nil {
 		return nil, err
@@ -398,6 +407,13 @@ func (repository Repository) Update(key, patch map[string]any) (json.RawMessage,
 	if err != nil {
 		return nil, err
 	}
+	if conditional {
+		predicate, err := repository.filter(condition, &params, 0)
+		if err != nil || predicate == "" {
+			return nil, errors.New("conditional update requires a predicate")
+		}
+		where += " and (" + predicate + ")"
+	}
 	selection, err := repository.selection()
 	if err != nil {
 		return nil, err
@@ -405,6 +421,9 @@ func (repository Repository) Update(key, patch map[string]any) (json.RawMessage,
 	rows, err := repository.Connection.Query("update "+table+" set "+strings.Join(sets, ", ")+" where "+where+" returning "+selection, params)
 	if err != nil {
 		return nil, err
+	}
+	if conditional && len(rows) == 0 {
+		return nil, nil
 	}
 	if len(rows) != 1 {
 		return nil, errors.New("update did not return one row")

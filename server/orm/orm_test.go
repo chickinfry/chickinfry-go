@@ -20,6 +20,12 @@ func TestSchemaValidationBeforeIO(t *testing.T) {
 	if _, _, _, err := repository.values(map[string]any{"id": "00000000-0000-0000-0000-000000000001"}, false); err == nil {
 		t.Fatal("primary key patch accepted")
 	}
+	key := map[string]any{"id": "00000000-0000-0000-0000-000000000001", "tenant": "t"}
+	for _, condition := range []Filter{{}, Field[string]{Name: "unknown"}.Equal("n")} {
+		if _, err := repository.UpdateIf(key, condition, map[string]any{"name": "updated"}); err == nil {
+			t.Fatal("conditional update accepted an invalid predicate before I/O")
+		}
+	}
 	params := []any{}
 	if _, err := repository.key(map[string]any{"id": "00000000-0000-0000-0000-000000000001"}, &params); err == nil {
 		t.Fatal("incomplete composite key accepted")
