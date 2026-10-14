@@ -97,6 +97,7 @@ type conformanceState struct {
 	networkRequests      atomic.Int64
 	retentionUnavailable bool
 	finalUnobserved      bool
+	blockedRefreshSent   bool
 }
 
 type conformanceExchange struct {
@@ -256,6 +257,13 @@ func conformanceRefreshFailure(ctx context.Context) {
 	if state := conformanceStateFrom(ctx); state != nil {
 		conformanceEmission.Lock()
 		state.finalUnobserved = state.final == nil && state.last != nil && state.last.operation != "auth.refresh"
+		conformanceEmission.Unlock()
+	}
+}
+func conformanceRefreshBlocked(ctx context.Context) {
+	if state := conformanceStateFrom(ctx); state != nil {
+		conformanceEmission.Lock()
+		state.blockedRefreshSent = true
 		conformanceEmission.Unlock()
 	}
 }

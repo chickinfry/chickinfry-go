@@ -15,6 +15,7 @@ import (
 	"strings"
 	"testing"
 
+	plain "chickinfry-client-plain"
 	chik "github.com/chickinfry/chickinfry-go"
 	"github.com/chickinfry/chickinfry-go/conformance/driver"
 )
@@ -105,6 +106,29 @@ func TestGeneratedInputKeepsAbsentAndNull(t *testing.T) {
 		if !bytes.Equal(encoded, expected) {
 			t.Fatal("input presence changed")
 		}
+	}
+}
+
+func TestGeneratedMalformedSuccessResponses(t *testing.T) {
+	for _, body := range []string{
+		`null`, `[]`, `{}`, `{"wire_value":null}`, `{"wire_value":42}`, `{"wire_value":"ok","observed_at":null}`,
+	} {
+		t.Run(body, func(t *testing.T) {
+			peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusAccepted)
+				io.WriteString(w, body)
+			}))
+			defer peer.Close()
+			transport, err := chik.NewHTTP(peer.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			output, err := plain.New(transport).Probe.Echo(t.Context(), plain.ProbeEchoInput{WireValue: "ok"})
+			failure, ok := errors.AsType[*chik.OperationError](err)
+			if !ok || failure.Code != "invalid_response" || failure.Status != http.StatusAccepted || output != (plain.ProbeEchoOutput{}) {
+				t.Fatalf("malformed success error=%v, output=%+v", err, output)
+			}
+		})
 	}
 }
 

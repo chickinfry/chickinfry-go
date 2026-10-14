@@ -12,12 +12,14 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"net/netip"
 	"net/url"
 	"reflect"
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -79,6 +81,15 @@ type refreshFlights struct {
 type refreshKey struct {
 	store SessionStore
 	token string
+}
+
+type refreshResponse struct {
+	AccessToken      string `json:"access_token"`
+	RefreshToken     string `json:"refresh_token"`
+	ExpiresAt        string `json:"expires_at"`
+	RefreshExpiresAt string `json:"refresh_expires_at"`
+	UserID           string `json:"user_id"`
+	SessionID        string `json:"session_id"`
 }
 
 var customRefreshes refreshFlights
@@ -287,18 +298,22 @@ func (transport *HTTP) refreshSession(ctx context.Context, failed SessionCredent
 			if latest != failed {
 				return latest, nil
 			}
-			if _, blocked := unknownRefreshes.LoadOrStore(fingerprint, struct{}{}); blocked {
+			written := new(atomic.Bool)
+			if previous, blocked := unknownRefreshes.LoadOrStore(fingerprint, written); blocked {
 				unknownOutcome = true
+				if observed, ok := previous.(*atomic.Bool); ok && observed.Load() {
+					conformanceRefreshBlocked(refreshCtx)
+				}
 				return SessionCredentials{}, &OperationError{Code: "invalid_token", Status: http.StatusUnauthorized}
 			}
-			response := struct {
-				AccessToken      string `json:"access_token"`
-				RefreshToken     string `json:"refresh_token"`
-				ExpiresAt        string `json:"expires_at"`
-				RefreshExpiresAt string `json:"refresh_expires_at"`
-				UserID           string `json:"user_id"`
-				SessionID        string `json:"session_id"`
-			}{}
+			refreshCtx = httptrace.WithClientTrace(refreshCtx, &httptrace.ClientTrace{
+				WroteRequest: func(info httptrace.WroteRequestInfo) {
+					if info.Err == nil {
+						written.Store(true)
+					}
+				},
+			})
+			var response refreshResponse
 			// A lost or invalid response cannot prove that the server did not consume the token.
 			attempted = true
 			unknownOutcome = true
@@ -310,11 +325,7 @@ func (transport *HTTP) refreshSession(ctx context.Context, failed SessionCredent
 				}
 				return SessionCredentials{}, err
 			}
-			refreshed := SessionCredentials(response)
-			if !validCredentials(refreshed) {
-				return SessionCredentials{}, errors.New("invalid refresh response")
-			}
-			return refreshed, nil
+			return SessionCredentials(response), nil
 		})
 		if err != nil {
 			if !unknownOutcome && isUnauthorized(err) {
@@ -495,8 +506,17 @@ func (transport *HTTP) invokeOnce(ctx context.Context, operation string, input a
 		return &OperationError{Code: code, Status: response.StatusCode}
 	}
 	conformanceDecode(requestCtx)
-	if err := json.Unmarshal(data, output); err != nil {
-		return errors.New("invalid operation response")
+	value := reflect.ValueOf(output)
+	if value.Kind() != reflect.Pointer || value.IsNil() {
+		return &OperationError{Code: "invalid_response", Status: response.StatusCode}
 	}
+	decoded := reflect.New(value.Elem().Type())
+	if err := json.Unmarshal(data, decoded.Interface()); err != nil {
+		return &OperationError{Code: "invalid_response", Status: response.StatusCode}
+	}
+	if refreshed, ok := decoded.Interface().(*refreshResponse); ok && !validCredentials(SessionCredentials(*refreshed)) {
+		return &OperationError{Code: "invalid_response", Status: response.StatusCode}
+	}
+	value.Elem().Set(decoded.Elem())
 	return nil
 }

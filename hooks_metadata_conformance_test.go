@@ -9,8 +9,10 @@ import (
 	"go/parser"
 	"go/token"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httptrace"
 	"os"
 	"slices"
 	"strings"
@@ -253,5 +255,145 @@ func TestRuntimeErrorMetadataPreservesUnavailableOutcome(t *testing.T) {
 				t.Fatalf("rejection metadata: %+v", observed)
 			}
 		})
+	}
+}
+
+type conformanceZeroWriteConn struct{ net.Conn }
+
+func (connection conformanceZeroWriteConn) Write([]byte) (int, error) {
+	return 0, io.ErrClosedPipe
+}
+
+func TestTrackedConnectionWriteFailureReportsKnownOutcome(t *testing.T) {
+	client, peer := net.Pipe()
+	t.Cleanup(func() { client.Close(); peer.Close() })
+	transport, err := NewHTTPWithTimeout("http://127.0.0.1", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport.client.Transport.(*http.Transport).DialContext = func(context.Context, string, string) (net.Conn, error) {
+		return conformanceZeroWriteConn{client}, nil
+	}
+	var connection atomic.Pointer[conformanceConn]
+	ctx := httptrace.WithClientTrace(t.Context(), &httptrace.ClientTrace{
+		GotConn: func(info httptrace.GotConnInfo) {
+			if tracked, ok := info.Conn.(*conformanceConn); ok {
+				connection.Store(tracked)
+			}
+		},
+	})
+	var observed ConformanceResultEvent
+	ctx = WithConformanceHooks(ctx, "c:zero-write", ConformanceHooks{Result: func(event ConformanceResultEvent) { observed = event }})
+	if err := transport.Invoke(ctx, "auth.refresh", map[string]any{}, &map[string]any{}); !errors.Is(err, io.ErrClosedPipe) {
+		t.Fatalf("request error = %v, want first-write failure", err)
+	}
+	if tracked := connection.Load(); tracked == nil || tracked.requestBytes.Load() != 0 || tracked.requestSent {
+		t.Fatal("expected a tracked connection with no request bytes or successful write observation")
+	}
+	if observed.OutcomeUnknown == nil || *observed.OutcomeUnknown {
+		t.Fatalf("zero-write outcome = %v, want known false", observed.OutcomeUnknown)
+	}
+}
+
+func TestRefreshFailureReportsObservedUnknownOutcome(t *testing.T) {
+	for _, test := range []struct {
+		name, body string
+		status     int
+	}{
+		{name: "disconnect"},
+		{name: "empty credentials", body: `{}`, status: http.StatusAccepted},
+		{name: "null credentials", body: `null`, status: http.StatusAccepted},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var refreshes atomic.Int64
+			peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/auth.refresh" {
+					io.Copy(io.Discard, r.Body)
+					refreshes.Add(1)
+					if test.status != 0 {
+						w.WriteHeader(test.status)
+						io.WriteString(w, test.body)
+						return
+					}
+					connection, _, err := w.(http.Hijacker).Hijack()
+					if err != nil {
+						t.Error(err)
+						return
+					}
+					connection.Close()
+					return
+				}
+				w.WriteHeader(http.StatusUnauthorized)
+				io.WriteString(w, `{"error":"invalid_token"}`)
+			}))
+			defer peer.Close()
+			transport, _, err := ConformanceNewHTTPWithTimeout(peer.URL, time.Second)
+			if err != nil {
+				t.Fatal(err)
+			}
+			credentials := newRefreshStore().Credentials()
+			store := new(MemoryStore)
+			if err := store.Set(credentials); err != nil {
+				t.Fatal(err)
+			}
+			transport, err = transport.WithSession(store)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var observed ConformanceResultEvent
+			ctx := WithConformanceHooks(
+				t.Context(),
+				"c:refresh",
+				ConformanceHooks{Result: func(event ConformanceResultEvent) { observed = event }},
+			)
+			if err := transport.Invoke(ctx, "probe.echo", map[string]any{}, &map[string]any{}); err == nil {
+				t.Fatal("unknown refresh outcome succeeded")
+			}
+			hasStatus := observed.HTTPStatus != nil
+			if hasStatus != (test.status != 0) || hasStatus && *observed.HTTPStatus != test.status {
+				t.Fatalf("refresh status metadata: %+v", observed)
+			}
+			unknown := observed.OutcomeUnknown != nil && *observed.OutcomeUnknown
+			redacted := observed.RawTransportDetails != nil && !*observed.RawTransportDetails
+			if !unknown || !redacted {
+				t.Fatalf("lost refresh metadata: %+v", observed)
+			}
+			ctx = WithConformanceHooks(
+				t.Context(),
+				"c:after-refresh",
+				ConformanceHooks{Result: func(event ConformanceResultEvent) { observed = event }},
+			)
+			err = transport.Invoke(ctx, "probe.echo", map[string]any{}, &map[string]any{})
+			if !isInvalidToken(err) || refreshes.Load() != 1 || store.Credentials() != credentials {
+				t.Fatal("lost refresh was retried or changed the session")
+			}
+			if observed.OutcomeUnknown == nil || !*observed.OutcomeUnknown {
+				t.Fatal("locally blocked refresh lost its runtime outcome observation")
+			}
+		})
+	}
+}
+
+func TestBlockedRefreshPreservesUnobservedTransmission(t *testing.T) {
+	transport, err := NewHTTP("https://fixture.example")
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport.client.Transport = responseTransport(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path == "/auth.refresh" {
+			return nil, errors.New("unobservable transport failure")
+		}
+		return &http.Response{StatusCode: http.StatusUnauthorized, Body: io.NopCloser(strings.NewReader(`{"error":"invalid_token"}`)), Header: make(http.Header)}, nil
+	})
+	transport, err = transport.WithSession(newRefreshStore())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, callID := range []string{"c:unobserved", "c:blocked"} {
+		var observed ConformanceResultEvent
+		ctx := WithConformanceHooks(t.Context(), callID, ConformanceHooks{Result: func(event ConformanceResultEvent) { observed = event }})
+		if err := transport.Invoke(ctx, "probe.echo", map[string]any{}, &map[string]any{}); err == nil || observed.OutcomeUnknown != nil {
+			t.Fatal("unobservable transmission was inferred from an error or earlier status")
+		}
 	}
 }

@@ -107,7 +107,9 @@ func conformanceResult(ctx context.Context, result error) {
 			event.HTTPStatus = new(failure.Status)
 		}
 		if exchange == nil {
-			if state.last == nil {
+			if state.blockedRefreshSent {
+				event.OutcomeUnknown = new(true)
+			} else if state.last == nil {
 				event.OutcomeUnknown = new(false)
 			}
 			// Joined-flight exchanges belong to another call; the earlier 401

@@ -114,10 +114,38 @@ func TestHTTPUnknownRefreshOutcomeBlocksReuseAcrossTransports(t *testing.T) {
 	}
 	outcomes := []refreshOutcome{
 		{name: "connection closed"}, {name: "timeout"}, {name: "unreadable body"},
-		{name: "unreadable 401"}, {name: "invalid JSON"}, {name: "invalid credentials"},
+		{name: "unreadable 401"}, {name: "invalid JSON"},
+		{"invalid credentials", http.StatusAccepted, `{}`, "invalid_response"},
+		{"null credentials", http.StatusAccepted, `null`, "invalid_response"},
 		{"non-JSON 401", 401, "not JSON", "invalid_response"},
 		{"missing error 401", 401, "{}", "invalid_response"},
 		{"invalid code 401", 401, `{"error":"Bad-code"}`, "invalid_response"},
+	}
+	for _, field := range []string{
+		"access_token", "refresh_token", "expires_at", "refresh_expires_at", "user_id", "session_id",
+	} {
+		for _, variant := range []string{"missing", "null", "invalid"} {
+			body := map[string]any{
+				"access_token": strings.Repeat("c", 43), "refresh_token": strings.Repeat("d", 43),
+				"expires_at": "2099-01-01T00:00:00Z", "refresh_expires_at": "2099-01-02T00:00:00Z",
+				"user_id": "user", "session_id": "session",
+			}
+			switch variant {
+			case "missing":
+				delete(body, field)
+			case "null":
+				body[field] = nil
+			case "invalid":
+				body[field] = ""
+			}
+			data, err := json.Marshal(body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			outcomes = append(outcomes, refreshOutcome{
+				variant + " " + field, http.StatusAccepted, string(data), "invalid_response",
+			})
+		}
 	}
 	for _, status := range []int{400, 403, 429, 500} {
 		outcomes = append(outcomes,
@@ -169,8 +197,6 @@ func TestHTTPUnknownRefreshOutcomeBlocksReuseAcrossTransports(t *testing.T) {
 					<-releaseTimeout
 				case "invalid JSON":
 					fmt.Fprint(response, "not JSON")
-				case "invalid credentials":
-					writeRefreshResponse(t, response, http.StatusOK, map[string]string{})
 				default:
 					response.WriteHeader(outcome.status)
 					fmt.Fprint(response, outcome.body)
@@ -190,14 +216,21 @@ func TestHTTPUnknownRefreshOutcomeBlocksReuseAcrossTransports(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			err = signed.Invoke(t.Context(), "catalog.create", map[string]string{}, &struct{}{})
+			output := struct{ Value string }{Value: "unchanged"}
+			err = signed.Invoke(t.Context(), "catalog.create", map[string]string{}, &output)
 			if err == nil {
 				t.Fatal("unknown refresh outcome succeeded")
+			}
+			if output.Value != "unchanged" {
+				t.Fatal("failed refresh changed the caller output")
 			}
 			if outcome.status != 0 {
 				failure, ok := errors.AsType[*OperationError](err)
 				if !ok || failure.Status != outcome.status || failure.Code != outcome.code {
 					t.Fatalf("refresh error = %v, want %s / %d", err, outcome.code, outcome.status)
+				}
+				if err.Error() != fmt.Sprintf("operation failed (%s, HTTP %d)", outcome.code, outcome.status) {
+					t.Fatal("refresh error exposed response details")
 				}
 			}
 			secondTransport, err := NewHTTP(server.URL)
@@ -1342,7 +1375,7 @@ func TestHTTPPreservesInvalidAndUnreadableResponseErrors(t *testing.T) {
 		reader io.Reader
 		want   string
 	}{
-		{"invalid JSON", strings.NewReader("not JSON"), "invalid operation response"},
+		{"invalid JSON", strings.NewReader("not JSON"), "operation failed (invalid_response, HTTP 200)"},
 		{"body read failure", &responseFailureReader{remaining: 16}, "could not read operation response"},
 		{"overflow probe read failure", &responseFailureReader{remaining: 1 << 20}, "could not read operation response"},
 	} {
@@ -1360,5 +1393,27 @@ func TestHTTPPreservesInvalidAndUnreadableResponseErrors(t *testing.T) {
 				t.Fatalf("response error=%v closed=%t", err, body.closed)
 			}
 		})
+	}
+}
+
+func TestHTTPInvalidSuccessDoesNotPublishPartialOutput(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusAccepted)
+		io.WriteString(w, `{"wire_value":"partial","observed_at":42}`)
+	}))
+	defer server.Close()
+	transport, err := NewHTTP(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	output := struct {
+		WireValue  string `json:"wire_value"`
+		ObservedAt string `json:"observed_at"`
+	}{WireValue: "previous", ObservedAt: "previous"}
+	previous := output
+	err = transport.Invoke(t.Context(), "probe.echo", map[string]any{}, &output)
+	failure, ok := errors.AsType[*OperationError](err)
+	if !ok || failure.Code != "invalid_response" || failure.Status != http.StatusAccepted || output != previous {
+		t.Fatalf("invalid success error=%v, partial output published=%t", err, output != previous)
 	}
 }
