@@ -80,7 +80,7 @@ func TestStdoutRejectsEncodedCredentials(t *testing.T) {
 }
 
 func TestOversizedResultReturnsBoundedErrorWithSameID(t *testing.T) {
-	control := hello + command("c:client", "client.create", map[string]any{"clientRef": "client", "origin": "https://example.test", "requestTimeoutMs": 1000}) +
+	control := hello + command("c:client", "client.create", map[string]any{"clientRef": "client", "origin": "https://example.test", "fixture": "plain", "requestTimeoutMs": 1000}) +
 		command("c:call", "client.call", map[string]any{"clientRef": "client", "operation": "probe.echo", "input": map[string]any{}})
 	var stdout bytes.Buffer
 	err := Run(t.Context(), strings.NewReader(control), &stdout, strings.NewReader(""), func(context.Context, *chik.HTTP, string, json.RawMessage) (any, error) {

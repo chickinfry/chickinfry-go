@@ -67,7 +67,7 @@ func TestNilProtectedInputIsRejectedBeforeHandshake(t *testing.T) {
 
 func TestCreateRejectsStoreAndBearerTogether(t *testing.T) {
 	for _, values := range [][2]string{{"store", "access"}, {"", "access"}, {"store", ""}, {"", ""}} {
-		control := hello + command("c:create", "client.create", map[string]any{"clientRef": "client", "origin": "https://example.test", "requestTimeoutMs": 1000, "storeRef": values[0], "bearerRef": values[1]})
+		control := hello + command("c:create", "client.create", map[string]any{"clientRef": "client", "origin": "https://example.test", "fixture": "plain", "requestTimeoutMs": 1000, "storeRef": values[0], "bearerRef": values[1]})
 		results, err := execute(t, control, protectedTokens(), nil)
 		if err != nil || len(results) != 2 || results[1].Error == nil || *results[1].Error.Code != "invalid_args" {
 			t.Fatal("mixed authentication bindings accepted")
@@ -89,7 +89,7 @@ func TestClientCopyUsesBearerWithoutChangingSource(t *testing.T) {
 		json.NewEncoder(w).Encode(map[string]string{"wire_value": "ok", "observed_at": "unchanged"})
 	}))
 	defer peer.Close()
-	create := hello + command("c:create", "client.create", map[string]any{"clientRef": "base", "origin": peer.URL, "requestTimeoutMs": 1000}) +
+	create := hello + command("c:create", "client.create", map[string]any{"clientRef": "base", "origin": peer.URL, "fixture": "plain", "requestTimeoutMs": 1000}) +
 		command("c:copy", "client.copy", map[string]any{"sourceClientRef": "base", "clientRef": "signed", "bearerRef": "access"})
 	control := create + command("c:signed", "client.call", map[string]any{"clientRef": "signed", "operation": "probe.echo", "input": map[string]any{}}) +
 		command("c:base", "client.call", map[string]any{"clientRef": "base", "operation": "probe.echo", "input": map[string]any{}})
@@ -119,7 +119,7 @@ func TestClientFixtureIsExplicitAndCopyPreservesIt(t *testing.T) {
 				args["fixture"] = fixture
 			}
 			control := hello + command("c:create", "client.create", args)
-			if fixture == "unknown" || fixture == "auth" {
+			if fixture == "unknown" || fixture == "" {
 				results, err := execute(t, control, "", nil)
 				if err != nil || *results[1].Error.Code != "invalid_args" {
 					t.Fatal("unsupported fixture accepted")
@@ -134,9 +134,6 @@ func TestClientFixtureIsExplicitAndCopyPreservesIt(t *testing.T) {
 				return map[string]any{}, nil
 			})
 			want := fixture
-			if want == "" {
-				want = "plain"
-			}
 			if err != nil || len(results) != 4 || selected != want {
 				t.Fatal("fixture lost or inferred from the operation")
 			}
@@ -159,7 +156,7 @@ func TestHandshakeAcceptsExactNativeTarget(t *testing.T) {
 
 func TestReferenceGrammarAtEveryInputBoundary(t *testing.T) {
 	commands := map[string]map[string]any{
-		"client.create":        {"clientRef": "client", "origin": "https://example.test", "requestTimeoutMs": 1000},
+		"client.create":        {"clientRef": "client", "origin": "https://example.test", "fixture": "plain", "requestTimeoutMs": 1000},
 		"client.copy":          {"sourceClientRef": "base", "clientRef": "copy", "bearerRef": "access"},
 		"client.call":          {"clientRef": "base", "operation": "probe.echo", "input": map[string]any{}, "inputRefs": map[string]string{}, "outputRefs": map[string]string{}},
 		"session.store.create": {"storeRef": "store", "origin": "https://example.test", "accessRef": "access", "refreshRef": "refresh", "recordRef": "record"},
@@ -167,7 +164,7 @@ func TestReferenceGrammarAtEveryInputBoundary(t *testing.T) {
 		"session.store.read":   {"storeRef": "store"},
 		"barrier.arm":          {"barrierRef": "barrier", "point": "sdk-entered", "participants": []string{"c:call"}},
 	}
-	prefix := hello + command("c:base", "client.create", map[string]any{"clientRef": "base", "origin": "https://example.test", "requestTimeoutMs": 1000})
+	prefix := hello + command("c:base", "client.create", map[string]any{"clientRef": "base", "origin": "https://example.test", "fixture": "plain", "requestTimeoutMs": 1000})
 	for name, ref := range map[string]string{"space": "bad ref", "unicode": "한글", "leading-punctuation": ":bad", "empty": "", "over-limit": strings.Repeat("x", 257)} {
 		t.Run(name, func(t *testing.T) {
 			row, _ := json.Marshal(map[string]string{"ref": ref, "value": "protected-value"})
@@ -203,7 +200,7 @@ func TestReferenceGrammarAtEveryInputBoundary(t *testing.T) {
 	if _, err := loadCredentials(strings.NewReader(string(row) + "\n")); err != nil {
 		t.Fatal("valid 256-character reference rejected")
 	}
-	results, err := execute(t, hello+command("c:create", "client.create", map[string]any{"clientRef": ref, "origin": "https://example.test", "requestTimeoutMs": 1000}), "", nil)
+	results, err := execute(t, hello+command("c:create", "client.create", map[string]any{"clientRef": ref, "origin": "https://example.test", "fixture": "plain", "requestTimeoutMs": 1000}), "", nil)
 	if err != nil || len(results) != 2 || results[1].Error != nil {
 		t.Fatal("valid client reference rejected")
 	}
@@ -268,5 +265,50 @@ func TestRefreshHTTPStatusDoesNotResolveUnknownOutcome(t *testing.T) {
 				t.Fatal("unobservable outcome was not encoded as null")
 			}
 		})
+	}
+}
+
+func TestRevision3FieldsRejectInvalidValues(t *testing.T) {
+	for _, value := range []any{"", nil, 3, true} {
+		results, err := execute(t, hello+command("c:create", "client.create", map[string]any{
+			"clientRef": "client", "origin": "https://example.test", "requestTimeoutMs": 1000, "fixture": value,
+		}), "", nil)
+		if err != nil || len(results) != 2 || results[1].Error == nil || *results[1].Error.Code != "invalid_args" {
+			t.Fatalf("invalid fixture accepted: %v", value)
+		}
+	}
+	for name, values := range map[string]map[string]any{
+		"missing call":         {"afterSequence": 0},
+		"null call":            {"callId": nil, "afterSequence": 0},
+		"empty call":           {"callId": "", "afterSequence": 0},
+		"malformed call":       {"callId": "c:bad ref", "afterSequence": 0},
+		"wrong direction":      {"callId": "d:call", "afterSequence": 0},
+		"empty suffix":         {"callId": "c:", "afterSequence": 0},
+		"numeric call":         {"callId": 3, "afterSequence": 0},
+		"missing watermark":    {"callId": "c:call"},
+		"null watermark":       {"callId": "c:call", "afterSequence": nil},
+		"negative watermark":   {"callId": "c:call", "afterSequence": -1},
+		"fractional watermark": {"callId": "c:call", "afterSequence": 0.5},
+		"string watermark":     {"callId": "c:call", "afterSequence": "0"},
+		"overflow watermark":   {"callId": "c:call", "afterSequence": json.RawMessage("18446744073709551616")},
+	} {
+		t.Run(name, func(t *testing.T) {
+			results, err := execute(t, hello+command("c:observe", "client.observe", values), "", nil)
+			if err != nil || len(results) != 2 || results[1].Error == nil || *results[1].Error.Code != "invalid_args" {
+				t.Fatalf("invalid observation args accepted: %+v, %v", results, err)
+			}
+		})
+	}
+	for _, field := range []string{"callID", "AfterSequence", "extra"} {
+		values := map[string]any{"callId": "c:call", "afterSequence": 0, field: 0}
+		_, err := execute(t, hello+command("c:observe", "client.observe", values), "", nil)
+		e, ok := errors.AsType[*Error](err)
+		if !ok || *e.Code != "protocol_violation" {
+			t.Fatal("unknown or case-variant observation field accepted")
+		}
+	}
+	results, err := execute(t, hello+command("c:observe", "client.observe", map[string]any{"callId": "c:call", "afterSequence": 0}), "", nil)
+	if err != nil || results[1].Error == nil || results[1].Error.Kind != "unimplemented" {
+		t.Fatal("unavailable transport observations fabricated")
 	}
 }

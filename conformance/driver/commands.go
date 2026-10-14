@@ -30,12 +30,15 @@ type args struct {
 	Point            string            `json:"point"`
 	Participants     []string          `json:"participants"`
 	IncludeTrace     *bool             `json:"includeTrace"`
+	CallID           string            `json:"callId"`
+	AfterSequence    *uint64           `json:"afterSequence"`
 }
 
 var fields = map[string][]string{
 	"client.create":        {"clientRef", "origin", "storeRef", "bearerRef", "requestTimeoutMs", "fixture"},
 	"client.copy":          {"sourceClientRef", "clientRef", "bearerRef"},
 	"client.call":          {"clientRef", "operation", "input", "inputRefs", "outputRefs"},
+	"client.observe":       {"callId", "afterSequence"},
 	"session.store.create": {"storeRef", "accessRef", "refreshRef", "recordRef", "origin"},
 	"session.store.write":  {"storeRef", "accessRef", "refreshRef", "recordRef"},
 	"session.store.read":   {"storeRef", "includeTrace"},
@@ -102,7 +105,7 @@ func (s *server) dispatch(req request) *Error {
 		var transport *chik.HTTP
 		var store *storeBinding
 		var err error
-		fixture := "plain"
+		var fixture string
 		if req.Command == "client.copy" {
 			source := s.clients[a.SourceClientRef]
 			if source == nil {
@@ -113,12 +116,10 @@ func (s *server) dispatch(req request) *Error {
 				return failure("driver", "invalid_args")
 			}
 		} else {
-			if _, supplied := keys["fixture"]; supplied {
-				if a.Fixture != "plain" {
-					return failure("driver", "invalid_args")
-				}
-				fixture = a.Fixture
+			if a.Fixture != "plain" && a.Fixture != "auth" {
+				return failure("driver", "invalid_args")
 			}
+			fixture = a.Fixture
 			_, hasOrigin := keys["origin"]
 			_, hasStore := keys["storeRef"]
 			_, hasBearer := keys["bearerRef"]
@@ -161,6 +162,11 @@ func (s *server) dispatch(req request) *Error {
 			return e
 		}
 		s.reply(req.ID, map[string]any{"barrierRef": a.BarrierRef, "state": "armed"}, nil)
+	case "client.observe":
+		if !validReference(a.CallID) || !strings.HasPrefix(a.CallID, "c:") || len(a.CallID) <= 2 || a.AfterSequence == nil {
+			return failure("driver", "invalid_args")
+		}
+		return failure("unimplemented", "unimplemented")
 	case "client.call":
 		binding := s.clients[a.ClientRef]
 		if binding == nil {

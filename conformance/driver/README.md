@@ -16,12 +16,12 @@ There is no custom builder, shell command, driver-selected output directory, or
 committed generated SDK. The declaration pins the implementation commit; its
 publication commit changes only declaration metadata.
 
-The current client creation path is plain-only. Omitting
-`client.create.args.fixture` or supplying `plain` selects the plain generated SDK;
-copies retain that selection. `auth`, unknown, and empty supplied values are
-`invalid_args` until the common revision-3 contract is available. Operations
-requiring the auth SDK return `unimplemented`. Fixture identity is never inferred
-from operation names, case IDs, files, or credential presence.
+Every client creation request requires `fixture: "plain"` or `fixture: "auth"`.
+The driver selects the corresponding fixed generated SDK alias, and copies retain
+that selection. Missing, empty, null, non-string and unknown values are
+`invalid_args`. Fixture identity is never inferred from operation names, case IDs,
+files, or credential presence. Suite/execution/result schema version 3 is owned by
+the coordinator; the driver process protocol remains version 1.
 
 The executable reads initial credentials from inherited anonymous pipe descriptor
 3, with exactly `ref` and `value` string keys. A complete line including LF is at
@@ -62,11 +62,16 @@ return these actual attempts, including an observed empty list when no clear ran
 unmeasurable clear observations return `unimplemented`. Session capabilities are
 advertised together only in builds with both runtime observations.
 
-client.transport and client.observe await the revision-3 wire contract and remain
-unimplemented. Constructor network count is unavailable because the constructor
-has no hook context or constructor event.
-Missing constructor-network and raw-transport-error observations cannot establish
-the coordinator's corresponding conformance cases.
+`client.transport` is not advertised. `client.observe` validates the revision-3
+`callId` and nonnegative integer `afterSequence` arguments, then returns
+`unimplemented`; it emits no fabricated snapshot. The runtime's existing hooks
+measure loopback HTTP only: HTTPS has no connection/body-buffer measurements,
+and the constructor and user-visible errors do not expose
+`constructorNetworkRequests` or `rawTransportDetails`. Consequently the driver
+cannot provide all required fields, including a complete eight-field transport
+snapshot, from actual observations. These missing observations also prevent
+C-02 and SDK-error-dependent cases from establishing conformance. No partial
+transport capability or hard-coded zero/false counters are published.
 
 Generated input models serialize valid declared fields, and the input adapter
 preserves absent/null fields which Go string structs cannot represent. Generated

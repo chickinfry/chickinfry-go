@@ -25,7 +25,7 @@ func runtimeCall(ctx context.Context, transport *chik.HTTP, operation string, in
 }
 
 func seededControl(origin string) string {
-	return hello + command("c:client", "client.create", map[string]any{"clientRef": "client", "origin": origin, "requestTimeoutMs": 1000})
+	return hello + command("c:client", "client.create", map[string]any{"clientRef": "client", "origin": origin, "fixture": "plain", "requestTimeoutMs": 1000})
 }
 
 func protectedTokens() string {
@@ -233,7 +233,7 @@ func TestConcurrentCompletionsKeepWholeStdoutLines(t *testing.T) {
 	var once sync.Once
 	unblock := func() { once.Do(func() { close(release) }) }
 	t.Cleanup(unblock)
-	control := hello + command("c:create", "client.create", map[string]any{"clientRef": "client", "origin": "https://example.test", "requestTimeoutMs": 1000})
+	control := hello + command("c:create", "client.create", map[string]any{"clientRef": "client", "origin": "https://example.test", "fixture": "plain", "requestTimeoutMs": 1000})
 	for i := range calls {
 		control += command(fmt.Sprintf("c:call:%d", i), "client.call", map[string]any{"clientRef": "client", "operation": "probe.echo", "input": map[string]any{}})
 	}

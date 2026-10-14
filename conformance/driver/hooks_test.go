@@ -83,7 +83,7 @@ func TestActualSDKBarriersReleaseOnlyTheirCall(t *testing.T) {
 			}
 			send(hello)
 			read()
-			send(command("c:client", "client.create", map[string]any{"clientRef": "client", "origin": peer.URL, "requestTimeoutMs": 1000}))
+			send(command("c:client", "client.create", map[string]any{"clientRef": "client", "origin": peer.URL, "fixture": "plain", "requestTimeoutMs": 1000}))
 			read()
 			send(command("c:arm", "barrier.arm", map[string]any{"barrierRef": "barrier", "point": point, "participants": []string{"c:call"}}))
 			read()

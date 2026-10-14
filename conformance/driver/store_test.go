@@ -25,7 +25,7 @@ func storeArgs() map[string]any {
 
 func TestSessionStoreRoundTripAndCopy(t *testing.T) {
 	control := hello + command("c:store", "session.store.create", storeArgs()) +
-		command("c:client", "client.create", map[string]any{"clientRef": "client", "origin": "https://example.test", "requestTimeoutMs": 1000, "storeRef": "store"}) +
+		command("c:client", "client.create", map[string]any{"clientRef": "client", "origin": "https://example.test", "fixture": "plain", "requestTimeoutMs": 1000, "storeRef": "store"}) +
 		command("c:copy", "client.copy", map[string]any{"sourceClientRef": "client", "clientRef": "copy", "bearerRef": "access"}) +
 		command("c:read", "session.store.read", map[string]any{"storeRef": "store", "includeTrace": true}) +
 		command("c:write", "session.store.write", map[string]any{"storeRef": "store", "recordRef": "record", "accessRef": "access", "refreshRef": "refresh"}) +
@@ -84,7 +84,7 @@ func TestSessionRecordValidation(t *testing.T) {
 }
 
 func TestSessionBindingRejectsAnotherOrigin(t *testing.T) {
-	control := hello + command("c:store", "session.store.create", storeArgs()) + command("c:client", "client.create", map[string]any{"clientRef": "client", "origin": "https://other.test", "requestTimeoutMs": 1000, "storeRef": "store"})
+	control := hello + command("c:store", "session.store.create", storeArgs()) + command("c:client", "client.create", map[string]any{"clientRef": "client", "origin": "https://other.test", "fixture": "plain", "requestTimeoutMs": 1000, "storeRef": "store"})
 	results, err := execute(t, control, protectedRecord(sessionRecord(strings.Repeat("A", 43), strings.Repeat("B", 43))), nil)
 	if err != nil || results[2].Error == nil || *results[2].Error.Code != "invalid_args" {
 		t.Fatal("session credentials bound to another origin")

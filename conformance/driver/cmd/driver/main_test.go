@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -55,6 +56,28 @@ func TestGeneratedFixtureBridges(t *testing.T) {
 	}
 	if _, err := call(t.Context(), transport, "probe.echo", json.RawMessage(`{}`)); err == nil {
 		t.Fatal("unselected fixture accepted")
+	}
+	for _, fixture := range []string{"plain", "auth"} {
+		control := fmt.Sprintf(`{"id":"c:hello","command":"handshake","args":{"protocolVersions":[1],"runId":"run","requiredCapabilities":[]}}
+{"id":"c:create","command":"client.create","args":{"caseId":"case","timeoutMs":2000,"clientRef":"client","fixture":%q,"origin":%q,"requestTimeoutMs":1000}}
+{"id":"c:call","command":"client.call","args":{"caseId":"case","timeoutMs":2000,"clientRef":"client","operation":"auth.refresh","input":{"refresh_token":"input"}}}
+`, fixture, peer.URL)
+		var output bytes.Buffer
+		if err := driver.Run(t.Context(), strings.NewReader(control), &output, strings.NewReader(""), call); err != nil {
+			t.Fatal(err)
+		}
+		d := json.NewDecoder(&output)
+		var result struct {
+			Error *driver.Error `json:"error"`
+		}
+		for range 3 {
+			if err := d.Decode(&result); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if fixture == "plain" && (result.Error == nil || result.Error.Kind != "unimplemented") || fixture == "auth" && result.Error != nil {
+			t.Fatal("explicit fixture did not select its generated bridge")
+		}
 	}
 }
 
