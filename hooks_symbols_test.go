@@ -15,7 +15,7 @@ func TestConformanceExportedSymbolsRequireBuildTag(t *testing.T) {
 		registration := "ctx := context.Background()"
 		if tagged {
 			name = "tagged"
-			registration = `ctx := chik.WithConformanceHooks(context.Background(), "call:symbol", chik.ConformanceHooks{})`
+			registration = `ctx := chik.WithConformanceHooks(context.Background(), "call:symbol", chik.ConformanceHooks{}); fmt.Println(chik.ConformanceStoreRevision(new(chik.MemoryStore)))`
 		}
 		source := `package main
 import ("context"; "fmt"; chik "github.com/chickinfry/chickinfry-go")
@@ -28,7 +28,7 @@ func main(){` + registration + `;transport,err:=chik.NewHTTP("http://127.0.0.1:1
 		if !tagged {
 			// nm alone misses exported APIs eliminated as unused by the linker.
 			probe := filepath.Join(root, "unavailable.go")
-			probeSource := strings.Replace(source, registration, `ctx := chik.WithConformanceHooks(context.Background(), "call:symbol", chik.ConformanceHooks{})`, 1)
+			probeSource := strings.Replace(source, registration, `ctx := chik.WithConformanceHooks(context.Background(), "call:symbol", chik.ConformanceHooks{}); fmt.Println(chik.ConformanceStoreRevision(new(chik.MemoryStore)))`, 1)
 			if err := os.WriteFile(probe, []byte(probeSource), 0600); err != nil {
 				t.Fatal(err)
 			}
@@ -38,6 +38,9 @@ func main(){` + registration + `;transport,err:=chik.NewHTTP("http://127.0.0.1:1
 			}
 			if !strings.Contains(string(output), "undefined: chik.WithConformanceHooks") {
 				t.Fatalf("default API probe failed for another reason: %s", output)
+			}
+			if !strings.Contains(string(output), "undefined: chik.ConformanceStoreRevision") {
+				t.Fatalf("default build declares the store revision API: %s", output)
 			}
 		}
 		args := []string{"build", "-gcflags=all=-l", "-o", binary}
@@ -56,6 +59,9 @@ func main(){` + registration + `;transport,err:=chik.NewHTTP("http://127.0.0.1:1
 		present := strings.Contains(symbols, "github.com/chickinfry/chickinfry-go.WithConformanceHooks")
 		if present != tagged {
 			t.Fatalf("%s registration symbol=%t", name, present)
+		}
+		if present := strings.Contains(symbols, "github.com/chickinfry/chickinfry-go.ConformanceStoreRevision"); present != tagged {
+			t.Fatalf("%s store revision symbol=%t", name, present)
 		}
 		if !tagged && strings.Contains(symbols, "github.com/chickinfry/chickinfry-go.Conformance") {
 			t.Fatal("default binary exposes conformance types")

@@ -112,6 +112,17 @@ func WithConformanceHooks(ctx context.Context, callID string, hooks ConformanceH
 	hooks.CredentialRefs = maps.Clone(hooks.CredentialRefs)
 	return context.WithValue(ctx, conformanceKey{}, &conformanceState{hooks: hooks, callID: callID})
 }
+
+// ConformanceStoreRevision observes a MemoryStore's mutation count in tagged builds only.
+// It starts at zero and increments once per successful Set or stored Refresh result,
+// and once per Clear that removes credentials. It is an observation, not a lock;
+// a separate Credentials call may observe a later mutation.
+func ConformanceStoreRevision(store *MemoryStore) uint64 {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	return store.revision
+}
+
 func conformanceStateFrom(ctx context.Context) *conformanceState {
 	state, _ := ctx.Value(conformanceKey{}).(*conformanceState)
 	return state

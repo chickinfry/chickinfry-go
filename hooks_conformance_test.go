@@ -311,6 +311,63 @@ func TestConformanceIndependentRefreshFlightsHaveDistinctReferences(t *testing.T
 	}
 }
 
+func TestConformanceStoreRevisionMutations(t *testing.T) {
+	store := new(MemoryStore)
+	independent := new(MemoryStore)
+	original, rotated := newRefreshStore().Credentials(), newRefreshStore().Credentials()
+	stale := original
+	stale.SessionID = "another-session"
+	canceled, cancel := context.WithCancel(t.Context())
+	cancel()
+	for _, test := range []struct {
+		name     string
+		run      func() error
+		wantErr  bool
+		revision uint64
+		want     SessionCredentials
+	}{
+		{name: "empty clear", run: func() error { return store.Clear(t.Context(), SessionCredentials{}) }},
+		{name: "set", run: func() error { return store.Set(original) }, revision: 1, want: original},
+		{name: "same set", run: func() error { return store.Set(original) }, revision: 2, want: original},
+		{name: "invalid set", run: func() error { return store.Set(SessionCredentials{}) }, wantErr: true, revision: 2, want: original},
+		{name: "nonmatching clear", run: func() error { return store.Clear(t.Context(), stale) }, revision: 2, want: original},
+		{name: "canceled clear", run: func() error { return store.Clear(canceled, original) }, wantErr: true, revision: 2, want: original},
+		{name: "failed refresh", run: func() error {
+			_, err := store.Refresh(t.Context(), func(context.Context, SessionCredentials) (SessionCredentials, error) {
+				return SessionCredentials{}, errors.New("refresh failed")
+			})
+			return err
+		}, wantErr: true, revision: 2, want: original},
+		{name: "invalid refresh", run: func() error {
+			_, err := store.Refresh(t.Context(), func(context.Context, SessionCredentials) (SessionCredentials, error) {
+				return SessionCredentials{}, nil
+			})
+			return err
+		}, wantErr: true, revision: 2, want: original},
+		{name: "refresh", run: func() error {
+			_, err := store.Refresh(t.Context(), func(context.Context, SessionCredentials) (SessionCredentials, error) {
+				return rotated, nil
+			})
+			return err
+		}, revision: 3, want: rotated},
+		{name: "matching clear", run: func() error { return store.Clear(t.Context(), rotated) }, revision: 4},
+		{name: "repeated clear", run: func() error { return store.Clear(t.Context(), rotated) }, revision: 4},
+	} {
+		if err := test.run(); (err != nil) != test.wantErr {
+			t.Fatalf("%s: operation error=%v, want error=%t", test.name, err, test.wantErr)
+		}
+		if got := ConformanceStoreRevision(store); got != test.revision {
+			t.Fatalf("%s: revision=%d, want %d", test.name, got, test.revision)
+		}
+		if store.Credentials() != test.want {
+			t.Fatalf("%s: credentials differ from expected state", test.name)
+		}
+		if got := ConformanceStoreRevision(independent); got != 0 {
+			t.Fatalf("%s: independent store revision=%d, want 0", test.name, got)
+		}
+	}
+}
+
 func TestConformanceMemoryStoreClearPreservesLoginAfterMatch(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		store := new(MemoryStore)
@@ -342,6 +399,8 @@ func TestConformanceMemoryStoreClearPreservesLoginAfterMatch(t *testing.T) {
 			installed <- store.Set(replacement)
 		}()
 		<-attempted
+		observed := make(chan uint64, 1)
+		go func() { observed <- ConformanceStoreRevision(store) }()
 		close(resume)
 		if err := <-cleared; err != nil {
 			t.Fatal(err)
@@ -351,6 +410,12 @@ func TestConformanceMemoryStoreClearPreservesLoginAfterMatch(t *testing.T) {
 		}
 		if store.Credentials() != replacement {
 			t.Fatal("clear removed credentials installed after match")
+		}
+		if got := <-observed; got < 2 || got > 3 {
+			t.Fatalf("concurrent revision=%d, want 2 or 3", got)
+		}
+		if got := ConformanceStoreRevision(store); got != 3 {
+			t.Fatalf("final revision=%d, want 3", got)
 		}
 	})
 }
@@ -480,6 +545,9 @@ func TestConformanceMemoryStoreClientsJoinOneRefresh(t *testing.T) {
 	}
 	if requests.Load() != 4 || refreshes.Load() != 1 || store.Credentials() != rotated {
 		t.Fatal("shared refresh did not save rotation and retry each original once")
+	}
+	if got := ConformanceStoreRevision(store); got != 2 {
+		t.Fatalf("shared refresh revision=%d, want 2", got)
 	}
 }
 
