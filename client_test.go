@@ -15,6 +15,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -232,80 +233,76 @@ func TestHTTPUnknownRefreshOutcomeBlocksReuseAcrossTransports(t *testing.T) {
 }
 
 func TestHTTPRefreshesOnceAndRetriesOnce(t *testing.T) {
-	store := newRefreshStore()
-	var refreshes atomic.Int64
-	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
-		switch request.URL.Path {
-		case "/catalog.create":
-			if request.Header.Get("Authorization") != "Bearer "+strings.Repeat("c", 43) {
-				writeRefreshResponse(t, response, http.StatusUnauthorized, map[string]string{"error": "invalid_token"})
-				return
-			}
-			writeRefreshResponse(t, response, http.StatusOK, map[string]string{})
-		case "/auth.refresh":
-			if request.Header.Get("Authorization") != "" {
-				t.Errorf("refresh request was not unauthenticated: %q", request.Header.Get("Authorization"))
-			}
-			if refreshes.Add(1) != 1 {
-				writeRefreshResponse(t, response, http.StatusUnauthorized, map[string]string{"error": "invalid_token"})
-				return
-			}
-			writeRefreshResponse(t, response, http.StatusOK, map[string]string{
-				"access_token": strings.Repeat("c", 43), "refresh_token": strings.Repeat("d", 43),
-				"expires_at": "2099-01-01T00:00:00Z", "refresh_expires_at": "2099-01-02T00:00:00Z",
-				"user_id": "user", "session_id": "session",
-			})
-		default:
-			t.Errorf("unexpected operation: %s", request.URL.Path)
+	synctest.Test(t, func(t *testing.T) {
+		store := new(MemoryStore)
+		original, rotated := newRefreshStore().Credentials(), newRefreshStore().Credentials()
+		rotated.AccessToken = strings.Repeat("c", 43)
+		if err := store.Set(original); err != nil {
+			t.Fatal(err)
 		}
-	}))
-	defer server.Close()
-
-	transport, err := NewHTTP(server.URL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	signed, err := transport.WithSession(store)
-	if err != nil {
-		t.Fatal(err)
-	}
-	secondTransport, err := NewHTTP(server.URL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	secondSigned, err := secondTransport.WithSession(store)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var workers sync.WaitGroup
-	start := make(chan struct{})
-	failures := make(chan error, 8)
-	for worker := range 8 {
-		workers.Add(1)
-		go func() {
-			defer workers.Done()
-			<-start
-			client := signed
-			if worker%2 == 1 {
-				client = secondSigned
+		var refreshes, requests atomic.Int64
+		originals, release := make(chan struct{}), make(chan struct{})
+		peer := responseTransport(func(request *http.Request) (*http.Response, error) {
+			status, body := http.StatusOK, "{}"
+			if request.URL.Path == "/auth.refresh" {
+				refreshes.Add(1)
+				if request.Header.Get("Authorization") != "" {
+					t.Error("refresh request was authenticated")
+				}
+				<-release
+				data, err := json.Marshal(map[string]string{
+					"access_token": rotated.AccessToken, "refresh_token": rotated.RefreshToken,
+					"expires_at": rotated.ExpiresAt, "refresh_expires_at": rotated.RefreshExpiresAt,
+					"user_id": rotated.UserID, "session_id": rotated.SessionID,
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				body = string(data)
+			} else {
+				requests.Add(1)
+				if request.Header.Get("Authorization") != "Bearer "+rotated.AccessToken {
+					if request.Header.Get("Authorization") != "Bearer "+original.AccessToken {
+						t.Error("original request used unexpected credentials")
+					}
+					<-originals
+					status, body = http.StatusUnauthorized, `{"error":"invalid_token"}`
+				}
 			}
-			if err := client.Invoke(t.Context(), "catalog.create", map[string]string{}, &struct{}{}); err != nil {
-				failures <- err
+			return &http.Response{StatusCode: status, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: request}, nil
+		})
+		results := make(chan error, 2)
+		for range 2 {
+			transport, err := NewHTTP("https://fixture.example")
+			if err != nil {
+				t.Fatal(err)
 			}
-		}()
-	}
-	close(start)
-	workers.Wait()
-	close(failures)
-	for err := range failures {
-		t.Fatal(err)
-	}
-	if refreshes.Load() != 1 {
-		t.Fatalf("refresh count = %d", refreshes.Load())
-	}
-	if store.Credentials().AccessToken != strings.Repeat("c", 43) || store.Credentials().RefreshToken != strings.Repeat("d", 43) {
-		t.Fatal("refreshed credentials were not stored")
-	}
+			transport.client.Transport = peer
+			signed, err := transport.WithSession(store)
+			if err != nil {
+				t.Fatal(err)
+			}
+			go func() { results <- signed.Invoke(t.Context(), "catalog.create", map[string]string{}, &struct{}{}) }()
+		}
+		synctest.Wait()
+		if requests.Load() != 2 || refreshes.Load() != 0 {
+			t.Fatal("both clients did not send their originals before refresh")
+		}
+		close(originals)
+		synctest.Wait()
+		if requests.Load() != 2 || refreshes.Load() != 1 {
+			t.Fatal("clients did not wait for one shared refresh")
+		}
+		close(release)
+		for range 2 {
+			if err := <-results; err != nil {
+				t.Fatal(err)
+			}
+		}
+		if refreshes.Load() != 1 || requests.Load() != 4 || store.Credentials() != rotated {
+			t.Fatalf("refreshes=%d originals=%d; want 1 refresh, 4 originals and saved rotation", refreshes.Load(), requests.Load())
+		}
+	})
 }
 
 func TestHTTPDoesNotRefreshAgainWhenRetryIsRejected(t *testing.T) {
@@ -342,7 +339,10 @@ func TestHTTPDoesNotRefreshAgainWhenRetryIsRejected(t *testing.T) {
 }
 
 func TestHTTPRefreshFailureEndsSessionWithoutRetryLoop(t *testing.T) {
-	store := newRefreshStore()
+	store := new(MemoryStore)
+	if err := store.Set(newRefreshStore().Credentials()); err != nil {
+		t.Fatal(err)
+	}
 	var operations atomic.Int64
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		operations.Add(1)
@@ -365,7 +365,7 @@ func TestHTTPRefreshFailureEndsSessionWithoutRetryLoop(t *testing.T) {
 	if operations.Load() != 2 {
 		t.Fatalf("operation count = %d", operations.Load())
 	}
-	if !store.Cleared() || store.Credentials().AccessToken != "" {
+	if store.Credentials() != (SessionCredentials{}) {
 		t.Fatal("rejected session was not cleared")
 	}
 }
@@ -806,7 +806,10 @@ func TestHTTPRefreshSynchronizesDistinctStoreCaches(t *testing.T) {
 func TestHTTPRefreshOverlapDoesNotClearOrBlockNewLogin(t *testing.T) {
 	for _, knownRejection := range []bool{false, true} {
 		t.Run(fmt.Sprintf("known rejection=%t", knownRejection), func(t *testing.T) {
-			store := newRefreshStore()
+			store := new(MemoryStore)
+			if err := store.Set(newRefreshStore().Credentials()); err != nil {
+				t.Fatal(err)
+			}
 			login := newRefreshStore().Credentials()
 			login.AccessToken = strings.Repeat("l", 43)
 			rotated := newRefreshStore().Credentials()
@@ -850,14 +853,14 @@ func TestHTTPRefreshOverlapDoesNotClearOrBlockNewLogin(t *testing.T) {
 			result := make(chan error, 1)
 			go func() { result <- signed.Invoke(t.Context(), "catalog.create", map[string]string{}, &struct{}{}) }()
 			<-started
-			store.mu.Lock()
-			store.credentials = login
-			store.mu.Unlock()
+			if err := store.Set(login); err != nil {
+				t.Fatal(err)
+			}
 			unblock()
 			if err := <-result; err == nil {
 				t.Fatal("old refresh unexpectedly succeeded")
 			}
-			if store.Credentials() != login || store.Cleared() {
+			if store.Credentials() != login {
 				t.Fatal("stale refresh cleared or replaced new login")
 			}
 			if err := signed.Invoke(t.Context(), "catalog.create", map[string]string{}, &struct{}{}); err != nil {

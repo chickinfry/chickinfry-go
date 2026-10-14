@@ -53,6 +53,8 @@ type SessionCredentials struct {
 // SessionStore defines reading, saving, and ending session credentials owned by the caller.
 // Refresh must serialize on the shared session unit, read its latest credentials,
 // and persist successful results before returning. Clear must match expected credentials.
+// MemoryStore provides these guarantees in memory and shares the SDK refresh flight
+// across clients. Custom stores remain responsible for their own shared storage semantics.
 type SessionStore interface {
 	Credentials() SessionCredentials
 	Refresh(ctx context.Context, operation func(context.Context, SessionCredentials) (SessionCredentials, error)) (SessionCredentials, error)
@@ -81,6 +83,9 @@ func (flights *refreshFlights) Do(ctx context.Context, refreshToken string, run 
 		return "", err
 	}
 	flights.mu.Lock()
+	if flights.flights == nil {
+		flights.flights = make(map[string]*refreshFlight)
+	}
 	if flight, ok := flights.flights[refreshToken]; ok {
 		flights.mu.Unlock()
 		if err := conformanceJoin(ctx, flight, false); err != nil {
@@ -135,6 +140,8 @@ func (transport *HTTP) WithBearer(token string) (*HTTP, error) {
 }
 
 // WithSession returns a copy that uses the given session store.
+// Clients bound to the same MemoryStore share one refresh flight. Each custom
+// store binding enters its own Refresh path to synchronize cached credentials.
 func (transport *HTTP) WithSession(store SessionStore) (*HTTP, error) {
 	if store == nil {
 		return nil, errors.New("session store is required")
@@ -151,8 +158,10 @@ func (transport *HTTP) WithSession(store SessionStore) (*HTTP, error) {
 		return nil, err
 	}
 	signed.session = store
-	// Each store binding must enter its own Refresh path to synchronize cached credentials.
 	signed.refreshes = &refreshFlights{flights: map[string]*refreshFlight{}}
+	if memory, ok := store.(*MemoryStore); ok {
+		signed.refreshes = &memory.refreshes
+	}
 	return signed, nil
 }
 
@@ -272,8 +281,7 @@ func (transport *HTTP) refreshSession(ctx context.Context, failed SessionCredent
 				return SessionCredentials{}, err
 			}
 			refreshed := SessionCredentials(response)
-			if !tokenPattern.MatchString(refreshed.AccessToken) || !tokenPattern.MatchString(refreshed.RefreshToken) ||
-				refreshed.ExpiresAt == "" || refreshed.RefreshExpiresAt == "" || refreshed.UserID == "" || refreshed.SessionID == "" {
+			if !validCredentials(refreshed) {
 				return SessionCredentials{}, errors.New("invalid refresh response")
 			}
 			return refreshed, nil

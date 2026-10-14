@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -249,7 +250,7 @@ func TestConformanceRefreshJoinUsesTheSameOpaqueReference(t *testing.T) {
 		}
 		return nil
 	}}
-	leader, finish, err := conformanceBegin(WithConformanceHooks(t.Context(), "call:leader", hooks), "http://127.0.0.1", false)
+	leader, finish, err := conformanceBegin(t.Context(), "http://127.0.0.1", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -282,13 +283,85 @@ func TestConformanceRefreshJoinUsesTheSameOpaqueReference(t *testing.T) {
 	}
 }
 
+func TestConformanceIndependentRefreshFlightsHaveDistinctReferences(t *testing.T) {
+	token := newRefreshStore().Credentials().RefreshToken
+	var refs []string
+	for range 2 {
+		store := new(MemoryStore)
+		ctx, finish, err := conformanceBegin(WithConformanceHooks(t.Context(), "call:independent", ConformanceHooks{
+			SessionTrace: func(event ConformanceSessionEvent) {
+				if event.RefreshRef != nil {
+					refs = append(refs, *event.RefreshRef)
+				}
+			},
+		}), "http://127.0.0.1", false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = store.refreshes.Do(ctx, token, func() (string, error) {
+			return "", conformanceRefreshSent(ctx)
+		})
+		finish()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(refs) != 2 || refs[0] == "" || refs[1] == "" || refs[0] == refs[1] {
+		t.Fatalf("independent refresh flights must have distinct nonempty references: %v", refs)
+	}
+}
+
+func TestConformanceMemoryStoreClearPreservesLoginAfterMatch(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		store := new(MemoryStore)
+		original, replacement := newRefreshStore().Credentials(), newRefreshStore().Credentials()
+		if err := store.Set(original); err != nil {
+			t.Fatal(err)
+		}
+		matched, resume := make(chan struct{}), make(chan struct{})
+		conformanceClearMatchedHook = func(current *MemoryStore) {
+			if current == store {
+				close(matched)
+				<-resume
+			}
+		}
+		defer func() { conformanceClearMatchedHook = nil }()
+		cleared, installed := make(chan error, 1), make(chan error, 1)
+		go func() { cleared <- store.Clear(t.Context(), original) }()
+		<-matched
+		attempted := make(chan struct{})
+		go func() {
+			// Mutex waits are not durable in synctest; probe before choosing the handshake.
+			if store.mu.TryLock() {
+				store.mu.Unlock()
+				installed <- store.Set(replacement)
+				close(attempted)
+				return
+			}
+			close(attempted)
+			installed <- store.Set(replacement)
+		}()
+		<-attempted
+		close(resume)
+		if err := <-cleared; err != nil {
+			t.Fatal(err)
+		}
+		if err := <-installed; err != nil {
+			t.Fatal(err)
+		}
+		if store.Credentials() != replacement {
+			t.Fatal("clear removed credentials installed after match")
+		}
+	})
+}
+
 func TestConformanceClearTracePreservesNewCredentials(t *testing.T) {
-	store := newRefreshStore()
-	expected := store.Credentials()
+	store := new(MemoryStore)
+	expected := newRefreshStore().Credentials()
 	replacement := newRefreshStore().Credentials()
-	store.mu.Lock()
-	store.credentials = replacement
-	store.mu.Unlock()
+	if err := store.Set(replacement); err != nil {
+		t.Fatal(err)
+	}
 	var trace ConformanceSessionEvent
 	ctx := WithConformanceHooks(t.Context(), "call:clear", ConformanceHooks{CredentialRefs: map[string]string{expected.AccessToken: "access:expected", expected.RefreshToken: "refresh:expected"}, SessionTrace: func(event ConformanceSessionEvent) { trace = event }})
 	if err := conformanceClear(ctx, store, expected); err != nil {
@@ -296,6 +369,117 @@ func TestConformanceClearTracePreservesNewCredentials(t *testing.T) {
 	}
 	if trace.Matched || trace.Removed == nil || *trace.Removed || !trace.Measurable || store.Credentials() != replacement {
 		t.Fatalf("new login clear trace=%+v", trace)
+	}
+}
+
+func TestConformanceMemoryStoreClientsJoinOneRefresh(t *testing.T) {
+	store := new(MemoryStore)
+	original, rotated := newRefreshStore().Credentials(), newRefreshStore().Credentials()
+	rotated.AccessToken = strings.Repeat("c", 43)
+	if err := store.Set(original); err != nil {
+		t.Fatal(err)
+	}
+	var refreshes, requests atomic.Int64
+	started, releaseRefresh := make(chan struct{}), make(chan struct{})
+	rejected, joined := make(chan ConformanceBarrierEvent, 2), make(chan ConformanceBarrierEvent, 2)
+	releaseOriginals, releaseJoined := make(chan struct{}), make(chan struct{})
+	unblockOriginals := sync.OnceFunc(func() { close(releaseOriginals) })
+	unblockJoined := sync.OnceFunc(func() { close(releaseJoined) })
+	unblockRefresh := sync.OnceFunc(func() { close(releaseRefresh) })
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/auth.refresh" {
+			if refreshes.Add(1) == 1 {
+				close(started)
+			}
+			<-releaseRefresh
+			writeSessionCredentials(t, response, rotated)
+			return
+		}
+		requests.Add(1)
+		if request.Header.Get("Authorization") == "Bearer "+rotated.AccessToken {
+			fmt.Fprint(response, "{}")
+		} else {
+			if request.Header.Get("Authorization") != "Bearer "+original.AccessToken {
+				t.Error("original used unexpected credentials")
+			}
+			writeRefreshResponse(t, response, 401, map[string]string{"error": "invalid_token"})
+		}
+	}))
+	defer server.Close()
+	defer unblockRefresh()
+	defer unblockJoined()
+	defer unblockOriginals()
+	var mu sync.Mutex
+	var participation []ConformanceSessionEvent
+	hooks := ConformanceHooks{
+		SessionTrace: func(event ConformanceSessionEvent) {
+			if event.RefreshRef != nil {
+				mu.Lock()
+				participation = append(participation, event)
+				mu.Unlock()
+			}
+		},
+		Barrier: func(ctx context.Context, event ConformanceBarrierEvent) error {
+			var release <-chan struct{}
+			switch event.Point {
+			case "both-originals-rejected":
+				rejected <- event
+				release = releaseOriginals
+			case "refresh-joined":
+				joined <- event
+				release = releaseJoined
+			default:
+				return nil
+			}
+			select {
+			case <-release:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		},
+	}
+	results := make(chan error, 2)
+	for _, callID := range []string{"call:first", "call:second"} {
+		transport, err := NewHTTP(server.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		signed, err := transport.WithSession(store)
+		if err != nil {
+			t.Fatal(err)
+		}
+		go func() {
+			results <- signed.Invoke(WithConformanceHooks(t.Context(), callID, hooks), "catalog.create", map[string]string{}, &struct{}{})
+		}()
+	}
+	firstRejected, secondRejected := <-rejected, <-rejected
+	if firstRejected.CallID == secondRejected.CallID || requests.Load() != 2 {
+		t.Fatal("both independent clients did not process their original rejection")
+	}
+	unblockOriginals()
+	<-started
+	firstJoin, secondJoin := <-joined, <-joined
+	if firstJoin.CallID == secondJoin.CallID || firstJoin.RefreshRef == "" || firstJoin.RefreshRef != secondJoin.RefreshRef || strings.Contains(firstJoin.RefreshRef, original.RefreshToken) {
+		t.Fatalf("refresh participation differs: %+v, %+v", firstJoin, secondJoin)
+	}
+	if refreshes.Load() != 1 || requests.Load() != 2 {
+		t.Fatal("refresh was duplicated or originals retried before release")
+	}
+	unblockJoined()
+	unblockRefresh()
+	for range 2 {
+		if err := <-results; err != nil {
+			t.Fatal(err)
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(participation) != 2 || participation[0].Joined == nil || participation[1].Joined == nil || *participation[0].Joined == *participation[1].Joined || !participation[0].Measurable || !participation[1].Measurable {
+		t.Fatalf("actual initiator and waiter were not observed: %+v", participation)
+	}
+	if requests.Load() != 4 || refreshes.Load() != 1 || store.Credentials() != rotated {
+		t.Fatal("shared refresh did not save rotation and retry each original once")
 	}
 }
 

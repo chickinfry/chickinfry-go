@@ -232,12 +232,13 @@ func (exchange *conformanceExchange) terminalLocked() {
 
 func conformanceFlightRegister(ctx context.Context, flight *refreshFlight, _ string) {
 	state := conformanceStateFrom(ctx)
-	if state == nil {
-		return
-	}
+	// A later participant may enable hooks even if the initiator did not.
 	conformanceRefreshes.Lock()
 	conformanceRefreshes.byFlight[flight] = "refresh:" + strconv.FormatUint(conformanceRefreshID.Add(1), 10)
 	conformanceRefreshes.Unlock()
+	if state == nil {
+		return
+	}
 	conformanceEmission.Lock()
 	state.flight = flight
 	conformanceEmission.Unlock()
@@ -349,16 +350,26 @@ func conformanceDo(client *http.Client, request *http.Request) (*http.Response, 
 	}
 	return received.response, received.err
 }
+
+// conformanceClearMatchedHook lets package tests force a login between a split compare/delete.
+var conformanceClearMatchedHook func(*MemoryStore)
+
+func conformanceClearMatched(store *MemoryStore) {
+	if conformanceClearMatchedHook != nil {
+		conformanceClearMatchedHook(store)
+	}
+}
+
 func conformanceClear(ctx context.Context, store SessionStore, expected SessionCredentials) (err error) {
 	state := conformanceStateFrom(ctx)
 	if state == nil || state.hooks.SessionTrace == nil {
 		return store.Clear(ctx, expected)
 	}
 	before := store.Credentials()
+	event := ConformanceSessionEvent{CallID: state.callID, Phase: "clear", ExpectedAccessRef: state.hooks.CredentialRefs[expected.AccessToken], ExpectedRefreshRef: state.hooks.CredentialRefs[expected.RefreshToken], Matched: before.AccessToken == expected.AccessToken && before.RefreshToken == expected.RefreshToken}
 	returned := false
 	defer func() {
-		event := ConformanceSessionEvent{CallID: state.callID, Phase: "clear", ExpectedAccessRef: state.hooks.CredentialRefs[expected.AccessToken], ExpectedRefreshRef: state.hooks.CredentialRefs[expected.RefreshToken], Matched: before.AccessToken == expected.AccessToken && before.RefreshToken == expected.RefreshToken}
-		if returned && err == nil {
+		if returned && err == nil && event.Removed == nil {
 			after := store.Credentials()
 			if after.AccessToken == "" && after.RefreshToken == "" {
 				event.Removed = new(before.AccessToken != "" || before.RefreshToken != "")
@@ -372,7 +383,15 @@ func conformanceClear(ctx context.Context, store SessionStore, expected SessionC
 		state.hooks.SessionTrace(event)
 		conformanceEmission.Unlock()
 	}()
-	err = store.Clear(ctx, expected)
+	if memory, ok := store.(*MemoryStore); ok {
+		err = ctx.Err()
+		if err == nil {
+			matched, removed := memory.clear(expected)
+			event.Matched, event.Removed = matched, new(removed)
+		}
+	} else {
+		err = store.Clear(ctx, expected)
+	}
 	returned = true
 	return err
 }

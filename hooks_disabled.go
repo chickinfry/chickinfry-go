@@ -13,6 +13,7 @@ func conformanceBegin(ctx context.Context, _ string, _ bool) (context.Context, f
 func conformanceBarrier(context.Context, string, string) error          { return nil }
 func conformanceFlightRegister(context.Context, *refreshFlight, string) {}
 func conformanceFlightEnd(*refreshFlight)                               {}
+func conformanceClearMatched(*MemoryStore)                              {}
 func conformanceJoin(context.Context, *refreshFlight, bool) error       { return nil }
 func conformanceClear(ctx context.Context, store SessionStore, expected SessionCredentials) error {
 	return store.Clear(ctx, expected)

@@ -59,6 +59,25 @@ func main() {
 of the transport that sends a bearer token, and `WithSession` attaches a
 `SessionStore` for automatic one-time refresh.
 
+Use a shared `MemoryStore` to keep a session in memory:
+
+```go
+store := new(chik.MemoryStore)
+if err := store.Set(credentials); err != nil {
+	return err
+}
+signed, err := transport.WithSession(store)
+```
+
+`credentials` is the complete `SessionCredentials` bundle returned by login.
+Clients bound to the same store pointer share one refresh, then each retries its
+original request once. Rejected refreshes clear only matching credentials; a
+concurrent `Set` or `Clear` prevents a late refresh from overwriting the session.
+The store does not persist credentials or coordinate across processes. Scope
+each store to one origin. Custom
+`SessionStore` implementations retain responsibility for serializing refreshes,
+saving successful results, and clearing only matching credentials.
+
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE).
