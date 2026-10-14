@@ -2,6 +2,8 @@ package driver
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -227,10 +229,10 @@ func TestOutputRegistrationRejectsIdenticalDuplicates(t *testing.T) {
 func TestRefreshHTTPStatusDoesNotResolveUnknownOutcome(t *testing.T) {
 	for _, status := range []int{429, 500} {
 		t.Run(fmt.Sprint(status), func(t *testing.T) {
-			access, refresh := strings.Repeat("E", 43), strings.Repeat("F", 43)
-			if status == 500 {
-				access, refresh = strings.Repeat("G", 43), strings.Repeat("H", 43)
-			}
+			var token [32]byte
+			rand.Read(token[:])
+			// Unknown refresh outcomes retain a token fingerprint across stores and runs.
+			access, refresh := strings.Repeat("E", 43), base64.RawURLEncoding.EncodeToString(token[:])
 			peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
 				if r.URL.Path == "/auth.refresh" {
