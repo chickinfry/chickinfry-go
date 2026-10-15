@@ -22,6 +22,7 @@ func (err *Error) Error() string { return err.Code }
 // Request contains the transport metadata and validated request handle.
 type Request struct {
 	Authorization *string         `json:"authorization"`
+	Cookie        *string         `json:"cookie"`
 	RID           int64           `json:"rid"`
 	Method        string          `json:"method"`
 	Path          string          `json:"path"`
@@ -39,7 +40,11 @@ type Session struct {
 }
 
 // Public returns request metadata without authentication credentials.
-func (request Request) Public() Request { request.Authorization = nil; return request }
+func (request Request) Public() Request {
+	request.Authorization = nil
+	request.Cookie = nil
+	return request
+}
 
 // Handler is the generated dispatcher installed by the customer entry.
 type Handler func(Request) (any, error)
