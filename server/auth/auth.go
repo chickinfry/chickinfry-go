@@ -10,6 +10,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf16"
 	"unicode/utf8"
 
 	"github.com/chickinfry/chickinfry-go/server"
@@ -91,11 +93,58 @@ func unique(err error) bool {
 	return ok && value.Code == "23505"
 }
 
-var emailFormat = regexp.MustCompile(`^[^\s@]+@[^\s@]+\.[^\s@]+$`)
+const emailWhitespace = "\t\n\v\f\r \u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff"
+
+var emailFormat = regexp.MustCompile("^[^" + emailWhitespace + "@]+@[^" + emailWhitespace + `@]+\.[^` + emailWhitespace + "@]+$")
 
 func normalizeEmail(value string) (string, error) {
-	value = strings.ToLower(strings.TrimSpace(value))
-	if !utf8.ValidString(value) || strings.ContainsRune(value, 0) || len(value) > 320 || !emailFormat.MatchString(value) {
+	value = strings.Trim(value, emailWhitespace)
+	if !utf8.ValidString(value) {
+		return "", fail(400, "invalid_input")
+	}
+	// Unicode SpecialCasing.txt adds only U+0130 and Final_Sigma to default lowercase.
+	// Final_Sigma uses the Cased/Case_Ignorable definitions in Unicode section 3.13.
+	isCased := func(r rune) bool {
+		return unicode.In(r, unicode.Lu, unicode.Ll, unicode.Lt, unicode.Other_Lowercase, unicode.Other_Uppercase)
+	}
+	isIgnorable := func(r rune) bool {
+		return unicode.In(r, unicode.Mn, unicode.Me, unicode.Cf, unicode.Lm, unicode.Sk) ||
+			strings.ContainsRune("'.:\u00b7\u0387\u055f\u05f4\u2018\u2019\u2024\u2027\ufe13\ufe52\ufe55\uff07\uff0e\uff1a", r)
+	}
+	runes := []rune(value)
+	var lower strings.Builder
+	precededByCased := false
+	for i, r := range runes {
+		mapped := unicode.ToLower(r)
+		if r == '\u03a3' && precededByCased {
+			mapped = '\u03c2'
+			for _, next := range runes[i+1:] {
+				if isIgnorable(next) {
+					continue
+				}
+				if isCased(next) {
+					mapped = '\u03c3'
+				}
+				break
+			}
+		}
+		lower.WriteRune(mapped)
+		if r == '\u0130' {
+			lower.WriteRune('\u0307')
+		}
+		if !isIgnorable(r) {
+			precededByCased = isCased(r)
+		}
+	}
+	value = lower.String()
+	if strings.ContainsRune(value, 0) || !emailFormat.MatchString(value) {
+		return "", fail(400, "invalid_input")
+	}
+	units := 0
+	for _, r := range value {
+		units += utf16.RuneLen(r)
+	}
+	if units > 320 {
 		return "", fail(400, "invalid_input")
 	}
 	return value, nil
