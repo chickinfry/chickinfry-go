@@ -59,17 +59,22 @@ func latestRefresh(db *private.Database, sessionID string) (*private.AppAuthRefr
 	return &rows[0], nil
 }
 
-func sessionExpiry(checked time.Time, policy SessionPolicy, session private.AppAuthSessionsRow, latest *private.AppAuthRefreshTokensRow) (time.Time, error) {
+type sessionLifetime struct {
+	firstLogin time.Time
+	expiresAt  time.Time
+}
+
+func sessionExpiry(checked time.Time, policy SessionPolicy, session private.AppAuthSessionsRow, latest *private.AppAuthRefreshTokensRow) (sessionLifetime, error) {
 	if session.RevokedAt != nil || session.Transport != "native" || latest == nil {
-		return time.Time{}, fail(401, "session_revoked")
+		return sessionLifetime{}, fail(401, "session_revoked")
 	}
 	// Stored expiry is a separate gate: a longer policy cannot revive old sessions.
-	ended, err := expiredAt(checked, latest.ExpiresAt)
+	stored, err := expiry(latest.ExpiresAt)
 	if err != nil {
-		return time.Time{}, err
+		return sessionLifetime{}, err
 	}
-	if ended {
-		return time.Time{}, fail(401, "session_revoked")
+	if !stored.After(checked) {
+		return sessionLifetime{}, fail(401, "session_revoked")
 	}
 	first := session.CreatedAt
 	if session.FirstLoginAt != nil {
@@ -77,7 +82,7 @@ func sessionExpiry(checked time.Time, policy SessionPolicy, session private.AppA
 	}
 	firstLogin, err := expiry(first)
 	if err != nil {
-		return time.Time{}, err
+		return sessionLifetime{}, err
 	}
 	base := latest.CreatedAt
 	if session.LastRenewedAt != nil {
@@ -85,31 +90,34 @@ func sessionExpiry(checked time.Time, policy SessionPolicy, session private.AppA
 	}
 	issued, err := expiry(base)
 	if err != nil {
-		return time.Time{}, err
+		return sessionLifetime{}, err
 	}
 	_, family := tokenExpirations(issued, firstLogin, policy)
-	ended, err = expiredAt(checked, family)
+	deadline, err := expiry(family)
 	if err != nil {
-		return time.Time{}, err
+		return sessionLifetime{}, err
 	}
-	if ended {
-		return time.Time{}, fail(401, "session_revoked")
+	if !deadline.After(checked) {
+		return sessionLifetime{}, fail(401, "session_revoked")
 	}
-	return firstLogin, nil
+	if stored.Before(deadline) {
+		deadline = stored
+	}
+	return sessionLifetime{firstLogin: firstLogin, expiresAt: deadline}, nil
 }
 
 func refreshExpirations(checked time.Time, policy SessionPolicy, session private.AppAuthSessionsRow, current, latest *private.AppAuthRefreshTokensRow, user *private.AppAuthUsersRow) (private.AppAuthSessionsUpdate, string, error) {
-	firstLogin, err := sessionExpiry(checked, policy, session, latest)
+	lifetime, err := sessionExpiry(checked, policy, session, latest)
 	if err != nil {
 		return private.AppAuthSessionsUpdate{}, "", err
 	}
 	if current == nil || current.ConsumedAt != nil || user == nil || user.DisabledAt != nil || user.SessionVersion != session.UserSessionVersion {
 		return private.AppAuthSessionsUpdate{}, "", fail(401, "session_revoked")
 	}
-	access, family := tokenExpirations(checked, firstLogin, policy)
+	access, family := tokenExpirations(checked, lifetime.firstLogin, policy)
 	patch := private.AppAuthSessionsUpdate{ExpiresAt: set(access), LastRenewedAt: set(timestamp(checked))}
 	if session.FirstLoginAt == nil {
-		patch.FirstLoginAt = set(timestamp(firstLogin))
+		patch.FirstLoginAt = set(timestamp(lifetime.firstLogin))
 	}
 	return patch, family, nil
 }

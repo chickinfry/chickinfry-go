@@ -2,7 +2,9 @@ package auth
 
 import (
 	"encoding/json"
+	"errors"
 	"reflect"
+	"regexp"
 	"testing"
 	"time"
 
@@ -171,5 +173,31 @@ func TestCleanupSelectedLiveFamilies(t *testing.T) {
 			dead.ExpiresAt = timestamp(checked)
 			requireRejected(t, checked, policy, session, &dead, &dead, &user)
 		})
+	}
+}
+
+func TestCleanupStart(t *testing.T) {
+	runtime := New(nil, Hooks{})
+	generate := runtime.cleanupStart
+	starts := []string{}
+	runtime.cleanupStart = func() (string, error) {
+		value, err := generate()
+		starts = append(starts, value)
+		return value, err
+	}
+	// A missing connection stops the pass after generating its start.
+	for range 2 {
+		if err := runtime.cleanup(now()); err == nil {
+			t.Fatal("cleanup unexpectedly queried without a connection")
+		}
+	}
+	format := regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
+	if len(starts) != 2 || !format.MatchString(starts[0]) || !format.MatchString(starts[1]) || starts[0] == starts[1] {
+		t.Fatal("each cleanup pass must use a fresh UUID v4 start from the generator")
+	}
+	failure := errors.New("random source unavailable")
+	runtime.cleanupStart = func() (string, error) { return "", failure }
+	if err := runtime.cleanup(now()); !errors.Is(err, failure) {
+		t.Fatal("cleanup must stop before querying when the start generator fails")
 	}
 }

@@ -1,13 +1,26 @@
 package auth
 
 import (
+	"crypto/rand"
 	"errors"
+	"fmt"
+	"io"
 	"time"
 
 	"github.com/chickinfry/chickinfry-go/server"
 	"github.com/chickinfry/chickinfry-go/server/auth/internal/private"
 	"github.com/chickinfry/chickinfry-go/server/orm"
 )
+
+func randomCleanupStart() (string, error) {
+	var id [16]byte
+	if _, err := io.ReadFull(rand.Reader, id[:]); err != nil {
+		return "", err
+	}
+	id[6] = id[6]&0x0f | 0x40
+	id[8] = id[8]&0x3f | 0x80
+	return fmt.Sprintf("%x-%x-%x-%x-%x", id[:4], id[4:6], id[6:8], id[8:10], id[10:]), nil
+}
 
 func cleanupSessionFilter(fields private.AppAuthSessionsColumns, checked time.Time, policy SessionPolicy) orm.Filter {
 	// Legacy access expiry only bounds selection; the locked check still uses Q1.
@@ -45,9 +58,26 @@ func (auth *Auth) cleanup(cutoff string) (err error) {
 	sessions := auth.db.AppAuthSessions
 	sf := sessions.Columns()
 	ended := cleanupSessionFilter(sf, checked, auth.policy)
-	rows, err := sessions.FindMany(orm.FindMany{Where: ended, Order: []orm.Order{sf.ExpiresAt.Asc(), sf.ID.Asc()}, Limit: limit})
+	start, err := auth.cleanupStart()
 	if err != nil {
 		return err
+	}
+	rows, err := sessions.FindMany(orm.FindMany{
+		Where: orm.And(ended, orm.Not(sf.ID.Less(start))),
+		Order: []orm.Order{sf.ID.Asc()}, Limit: limit,
+	})
+	if err != nil {
+		return err
+	}
+	if len(rows) < int(*limit) {
+		front, err := sessions.FindMany(orm.FindMany{
+			Where: orm.And(ended, sf.ID.Less(start)),
+			Order: []orm.Order{sf.ID.Asc()}, Limit: new(*limit - int32(len(rows))),
+		})
+		if err != nil {
+			return err
+		}
+		rows = append(rows, front...)
 	}
 	remainingRefresh := int32(32)
 	for _, candidate := range rows {

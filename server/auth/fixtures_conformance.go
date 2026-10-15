@@ -31,6 +31,16 @@ func ConformanceAuthFixture(connection *database.Connection, mode, userID string
 	case "access-expired":
 		_, err := db.AppAuthSessions.Update(private.AppAuthSessionsPrimaryKey{ID: userID}, private.AppAuthSessionsUpdate{ExpiresAt: set(timestamp(time.Now().Add(-time.Hour)))})
 		return err
+	case "cleanup-start", "cleanup-random":
+		policy, err := NewSessionPolicy(3600, 0)
+		if err != nil {
+			return err
+		}
+		runtime := New(connection, Hooks{}, policy)
+		if mode == "cleanup-start" {
+			runtime.cleanupStart = func() (string, error) { return userID, nil }
+		}
+		return runtime.cleanup(now())
 	case "cleanup-boundary":
 		cutoff := "2020-01-01T00:00:00.000Z"
 		for index, until := range []string{"2019-12-31T23:59:59.999999Z", cutoff, "2020-01-01T00:00:00.000001Z"} {

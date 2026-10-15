@@ -42,10 +42,11 @@ type Tokens struct {
 
 // Auth owns the private repositories for one live request.
 type Auth struct {
-	connection *database.Connection
-	db         *private.Database
-	hooks      Hooks
-	policy     SessionPolicy
+	connection   *database.Connection
+	db           *private.Database
+	hooks        Hooks
+	policy       SessionPolicy
+	cleanupStart func() (string, error)
 }
 
 // New binds the private repositories and generated hook adapter to a request.
@@ -61,7 +62,10 @@ func New(connection *database.Connection, hooks Hooks, policies ...SessionPolicy
 			panic("session policy must be created with NewSessionPolicy")
 		}
 	}
-	return &Auth{connection, private.New(connection), hooks, policy}
+	return &Auth{
+		connection: connection, db: private.New(connection), hooks: hooks,
+		policy: policy, cleanupStart: randomCleanupStart,
+	}
 }
 
 func fail(status int, code string) error     { return &server.Error{Status: status, Code: code} }
@@ -277,6 +281,19 @@ func (auth *Auth) signin(email, password string) (Tokens, error) {
 
 // Session validates a provided bearer; it never falls back to anonymous access.
 func (auth *Auth) Session(authorization *string) (*server.Session, error) {
+	result, err := auth.session(authorization)
+	if err != nil || result == nil {
+		return nil, err
+	}
+	return result.Session, nil
+}
+
+type sessionInfo struct {
+	*server.Session
+	expiresAt string
+}
+
+func (auth *Auth) session(authorization *string) (*sessionInfo, error) {
 	if authorization == nil {
 		return nil, nil
 	}
@@ -293,7 +310,7 @@ func (auth *Auth) Session(authorization *string) (*server.Session, error) {
 		return nil, fail(401, "invalid_token")
 	}
 	row := rows[0]
-	var result *server.Session
+	var result *sessionInfo
 	err = auth.db.Transaction(func(db *private.Database) error {
 		sessions := db.AppAuthSessions
 		locked, err := sessions.UpdateIf(private.AppAuthSessionsPrimaryKey{ID: row.ID}, orm.And(sessions.Columns().RevokedAt.IsNull(), sessions.Columns().TokenHash.Equal(digest(bearer))), private.AppAuthSessionsUpdate{RevokedAt: null[string]()})
@@ -305,7 +322,7 @@ func (auth *Auth) Session(authorization *string) (*server.Session, error) {
 		if err != nil {
 			return err
 		}
-		_, err = sessionExpiry(checked, auth.policy, *locked, latest)
+		lifetime, err := sessionExpiry(checked, auth.policy, *locked, latest)
 		if err != nil {
 			if failure, ok := errors.AsType[*server.Error](err); !ok || failure.Status != 401 {
 				return err
@@ -313,8 +330,8 @@ func (auth *Auth) Session(authorization *string) (*server.Session, error) {
 			_, err = sessions.Update(private.AppAuthSessionsPrimaryKey{ID: locked.ID}, private.AppAuthSessionsUpdate{RevokedAt: set(timestamp(checked))})
 			return err
 		}
-		ended, err := expiredAt(checked, locked.ExpiresAt)
-		if err != nil || ended {
+		access, err := expiry(locked.ExpiresAt)
+		if err != nil || !access.After(checked) {
 			return err
 		}
 		user, err := db.AppAuthUsers.FindByID(private.AppAuthUsersPrimaryKey{ID: locked.UserID})
@@ -322,7 +339,13 @@ func (auth *Auth) Session(authorization *string) (*server.Session, error) {
 			return err
 		}
 		if user != nil && user.DisabledAt == nil && user.SessionVersion == locked.UserSessionVersion {
-			result = &server.Session{ID: locked.ID, User: server.User{ID: user.ID, Email: user.Email}}
+			if lifetime.expiresAt.Before(access) {
+				access = lifetime.expiresAt
+			}
+			result = &sessionInfo{
+				Session:   &server.Session{ID: locked.ID, User: server.User{ID: user.ID, Email: user.Email}},
+				expiresAt: timestamp(access),
+			}
 		}
 		return nil
 	})
@@ -469,7 +492,7 @@ func (auth *Auth) Handle(request server.Request, emailPassword bool) (any, error
 		if err = server.DecodeInput(request.Body, nil, &struct{}{}); err != nil {
 			return nil, err
 		}
-		session, err := auth.Session(request.Authorization)
+		session, err := auth.session(request.Authorization)
 		if err != nil {
 			return nil, err
 		}
@@ -477,7 +500,7 @@ func (auth *Auth) Handle(request server.Request, emailPassword bool) (any, error
 			return nil, fail(401, "unauthenticated")
 		}
 		if request.Path == "/auth.session" {
-			return map[string]string{"id": session.User.ID, "email": session.User.Email, "session_id": session.ID}, nil
+			return map[string]string{"id": session.User.ID, "email": session.User.Email, "session_id": session.ID, "expires_at": session.expiresAt}, nil
 		}
 		_, err = auth.db.AppAuthSessions.UpdateIf(private.AppAuthSessionsPrimaryKey{ID: session.ID}, auth.db.AppAuthSessions.Columns().RevokedAt.IsNull(), private.AppAuthSessionsUpdate{RevokedAt: set(now())})
 		return map[string]string{"status": "signed_out"}, err
