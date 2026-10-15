@@ -167,7 +167,7 @@ func TestReferenceGrammarAtEveryInputBoundary(t *testing.T) {
 		"barrier.arm":          {"barrierRef": "barrier", "point": "sdk-entered", "participants": []string{"c:call"}},
 	}
 	prefix := hello + command("c:base", "client.create", map[string]any{"clientRef": "base", "origin": "https://example.test", "fixture": "plain", "requestTimeoutMs": 1000})
-	for name, ref := range map[string]string{"space": "bad ref", "unicode": "한글", "leading-punctuation": ":bad", "empty": "", "over-limit": strings.Repeat("x", 257)} {
+	for name, ref := range map[string]string{"space": "bad ref", "unicode": "\uD55C\uAE00", "leading-punctuation": ":bad", "empty": "", "over-limit": strings.Repeat("x", 257)} {
 		t.Run(name, func(t *testing.T) {
 			row, _ := json.Marshal(map[string]string{"ref": ref, "value": "protected-value"})
 			if _, err := loadCredentials(strings.NewReader(string(row) + "\n")); err == nil {

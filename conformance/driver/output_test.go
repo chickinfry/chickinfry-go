@@ -15,7 +15,7 @@ import (
 )
 
 func TestInvalidRequestIDIsNeverEchoed(t *testing.T) {
-	for name, id := range map[string]string{"space": "c:bad id", "reverse-space": "d:bad id", "unicode": "c:한글", "over-limit": "c:" + strings.Repeat("x", 255)} {
+	for name, id := range map[string]string{"space": "c:bad id", "reverse-space": "d:bad id", "unicode": "c:\uD55C\uAE00", "over-limit": "c:" + strings.Repeat("x", 255)} {
 		t.Run(name, func(t *testing.T) {
 			control := strings.Replace(hello, "c:hello", id, 1)
 			var stdout bytes.Buffer
