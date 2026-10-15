@@ -20,6 +20,34 @@ func TestAuthenticationFailureCannotReturnSuccess(t *testing.T) {
 	}
 }
 
+func TestSessionFailureCannotBecomeAnonymous(t *testing.T) {
+	authentication := New(database.New(1), Hooks{})
+	if session, err := authentication.Session(nil); session != nil || err != nil {
+		t.Fatal("missing authorization did not remain anonymous")
+	}
+	for _, valid := range []bool{false, true} {
+		bearer := ""
+		if valid {
+			value, err := token()
+			if err != nil {
+				t.Fatal("create session probe failed")
+			}
+			bearer = "Bearer " + value
+		}
+		// A valid bearer reaches the unsupported native host and must preserve its failure.
+		session, err := authentication.Session(&bearer)
+		if session != nil || err == nil {
+			t.Fatalf("session failure became anonymous: valid=%t", valid)
+		}
+		if !valid {
+			failure, ok := errors.AsType[*server.Error](err)
+			if !ok || failure.Status != 401 || failure.Code != "invalid_token" {
+				t.Fatal("invalid bearer lost its rejection")
+			}
+		}
+	}
+}
+
 func TestHookPanicStaysWithinItsCommitBoundary(t *testing.T) {
 	for _, code := range []string{"user_creation_failed", "user_created_effect_failed"} {
 		err := runHook(code, func() error { panic("private fixture error") })

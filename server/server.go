@@ -19,6 +19,9 @@ type Error struct {
 
 func (err *Error) Error() string { return err.Code }
 
+// ErrNotImplemented marks an explicitly unimplemented operation when returned.
+var ErrNotImplemented error = errors.New("not_implemented")
+
 // Request contains the transport metadata and validated request handle.
 type Request struct {
 	Authorization *string         `json:"authorization"`
@@ -83,7 +86,7 @@ func Handle(size int32) (status int32) {
 		output = []byte(`{"error":"invalid_input"}`)
 		return 400
 	}
-	if handler == nil {
+	if Initialize() != nil {
 		output = []byte(`{"error":"operation_failed"}`)
 		return 500
 	}
@@ -91,8 +94,10 @@ func Handle(size int32) (status int32) {
 	value, err := handler(request)
 	if err != nil {
 		failure, ok := errors.AsType[*Error](err)
-		if !ok || failure.Status < 400 || failure.Status > 599 || failure.Code == "" {
-			failure = &Error{500, "operation_failed"}
+		if errors.Is(err, ErrNotImplemented) {
+			failure = &Error{Status: 501, Code: "not_implemented"}
+		} else if !ok || failure == nil || failure.Status < 400 || failure.Status > 599 || failure.Code == "" {
+			failure = &Error{Status: 500, Code: "operation_failed"}
 		}
 		output, _ = json.Marshal(map[string]string{"error": failure.Code})
 		return int32(failure.Status)
@@ -117,17 +122,17 @@ func Output() (*byte, int32) {
 func DecodeInput(data []byte, fields []string, value any) error {
 	var object map[string]json.RawMessage
 	if host.Decode(data, &object) != nil || object == nil || !validUnicodeJSON(data) {
-		return &Error{400, "invalid_input"}
+		return &Error{Status: 400, Code: "invalid_input"}
 	}
 	for _, field := range fields {
 		var text string
 		if raw, ok := object[field]; !ok || string(raw) == "null" || json.Unmarshal(raw, &text) != nil {
-			return &Error{400, "invalid_input"}
+			return &Error{Status: 400, Code: "invalid_input"}
 		}
 	}
 	// API inputs permit extra fields; generated models discard them.
 	if err := json.Unmarshal(data, value); err != nil {
-		return &Error{400, "invalid_input"}
+		return &Error{Status: 400, Code: "invalid_input"}
 	}
 	return nil
 }

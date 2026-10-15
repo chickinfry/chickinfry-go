@@ -78,6 +78,36 @@ each store to one origin. Custom
 `SessionStore` implementations retain responsibility for serializing refreshes,
 saving successful results, and clearing only matching credentials.
 
+## Server initialization
+
+Generated entries can register a startup callback with
+`server.RegisterStartup(func() (server.Handler, error))`. Registration does not
+execute it. `server.Initialize()` waits for the callback once per instance and
+publishes its non-nil handler only on success. Concurrent callers wait for the
+same result. Returned errors, panics, and nil handlers become a remembered
+`operation_failed` failure; the instance does not retry or dispatch business code.
+`server.InitializeStatus()` returns 0 on success or 500 on failure for an entry's
+initialization export. Host boot wiring belongs to the generated entry and loader.
+`Handle` also checks initialization after validating the request frame.
+
+In Go, setup runs once per instance (currently once per request). Avoid expensive initialization.
+
+Register exactly one of `Register` or `RegisterStartup` during entry initialization,
+before initialization or dispatch. Existing `Register(handler)` entries continue
+to work without a startup callback. Registration is not a hot-swap API, and
+`Handle` retains its request-owned buffer contract.
+
+Operations can return `server.ErrNotImplemented`, including through error wrapping,
+for HTTP 501 with `{"error":"not_implemented"}`. Unexpected errors and all panics
+remain sanitized HTTP 500 failures. Startup failures always return 500, even if
+the callback returns `ErrNotImplemented`.
+
+Authentication continues to expose only `server.Session` (session ID and public
+user ID/email). Protected dispatch must reject a missing session before invoking
+business code; public dispatch may pass a nil session. Session lookup errors must
+propagate on both paths. With platform authentication enabled, `Request.Public()`
+removes credentials from a copy; without it, pass the original request through.
+
 ## Native server sessions
 
 Native server sessions use a 30-day idle timeout and no absolute lifetime by
