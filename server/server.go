@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"slices"
 	"strconv"
 
@@ -135,6 +136,13 @@ func DecodeInput(data []byte, fields []string, value any) error {
 		return &Error{Status: 400, Code: "invalid_input"}
 	}
 	return nil
+}
+
+var uuidPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+
+// ValidUUID reports whether value has the case-insensitive UUID shape used by id inputs.
+func ValidUUID(value string) bool {
+	return uuidPattern.MatchString(value)
 }
 
 // Environment reads an explicitly allowed logical binding.

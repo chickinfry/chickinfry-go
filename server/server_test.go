@@ -151,3 +151,30 @@ func TestInputUnicodeIsNotSilentlyReplaced(t *testing.T) {
 		}
 	}
 }
+
+func TestDecodeInputIDs(t *testing.T) {
+	for _, test := range []struct {
+		name, id string
+		valid    bool
+	}{
+		{"lowercase", "550e8400-e29b-41d4-a716-446655440000", true},
+		{"uppercase", "550E8400-E29B-41D4-A716-446655440000", true},
+		{"shape only", "00000000-0000-0000-0000-000000000000", true},
+		{"malformed", "not-a-uuid", false},
+		{"non-hexadecimal", "550g8400-e29b-41d4-a716-446655440000", false},
+		{"wrong separator", "550e8400_e29b-41d4-a716-446655440000", false},
+		{"empty", "", false},
+		{"trailing newline", "550e8400-e29b-41d4-a716-446655440000\n", false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if ValidUUID(test.id) != test.valid {
+				t.Fatalf("UUID validity did not match %t", test.valid)
+			}
+		})
+	}
+	var value map[string]string
+	err := DecodeInput([]byte(`{"id":"opaque","note":""}`), []string{"id", "note"}, &value)
+	if err != nil || value["id"] != "opaque" || value["note"] != "" {
+		t.Fatal("ordinary string field was rejected or changed")
+	}
+}
