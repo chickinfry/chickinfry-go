@@ -1,4 +1,4 @@
-package chik
+package chickinfry
 
 import (
 	"context"
@@ -43,7 +43,7 @@ func TestMemoryStoreRefreshCannotOverwriteConcurrentChange(t *testing.T) {
 					}
 				}
 				close(release)
-				if err := <-result; err == nil {
+				if err := <-result; !isSessionChange(err) {
 					t.Fatal("stale refresh succeeded")
 				}
 				if store.Credentials() != want {
@@ -61,10 +61,10 @@ func TestMemoryStoreInvalidWritesPreserveSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, invalid := range []SessionCredentials{{}, {AccessToken: "invalid", RefreshToken: original.RefreshToken}, {AccessToken: original.AccessToken, RefreshToken: original.RefreshToken}} {
-		if err := store.Set(invalid); err == nil {
+		if err := store.Set(invalid); !hasClientCode(err, CodeInvalidArgument) {
 			t.Fatal("invalid login accepted")
 		}
-		if _, err := store.Refresh(t.Context(), func(context.Context, SessionCredentials) (SessionCredentials, error) { return invalid, nil }); err == nil {
+		if _, err := store.Refresh(t.Context(), func(context.Context, SessionCredentials) (SessionCredentials, error) { return invalid, nil }); !hasClientCode(err, CodeInternal) {
 			t.Fatal("invalid refresh accepted")
 		}
 		if store.Credentials() != original {
@@ -90,4 +90,14 @@ func TestMemoryStoreInvalidWritesPreserveSession(t *testing.T) {
 	if store.Credentials() != original {
 		t.Fatal("canceled or mismatched clear removed session")
 	}
+}
+
+func isSessionChange(err error) bool {
+	failure, ok := errors.AsType[*ClientError](err)
+	return ok && failure.Code == CodeUnauthenticated && failure.Status == nil && failure.OutcomeUnknown
+}
+
+func hasClientCode(err error, code ClientErrorCode) bool {
+	failure, ok := errors.AsType[*ClientError](err)
+	return ok && failure.Code == code && failure.Status == nil
 }

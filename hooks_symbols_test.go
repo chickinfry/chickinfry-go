@@ -1,4 +1,4 @@
-package chik
+package chickinfry
 
 import (
 	"os"
@@ -15,11 +15,11 @@ func TestConformanceExportedSymbolsRequireBuildTag(t *testing.T) {
 		registration := "ctx := context.Background()"
 		if tagged {
 			name = "tagged"
-			registration = `ctx := chik.WithConformanceHooks(context.Background(), "call:symbol", chik.ConformanceHooks{}); fmt.Println(chik.ConformanceStoreRevision(new(chik.MemoryStore)))`
+			registration = `ctx := chickinfry.WithConformanceHooks(context.Background(), "call:symbol", chickinfry.ConformanceHooks{}); fmt.Println(chickinfry.ConformanceStoreRevision(new(chickinfry.MemoryStore)))`
 		}
 		source := `package main
-import ("context"; "fmt"; chik "github.com/chickinfry/chickinfry-go")
-func main(){` + registration + `;transport,err:=chik.NewHTTP("http://127.0.0.1:1");if err==nil{err=transport.Invoke(ctx,"catalog.create",map[string]string{},&struct{}{})};fmt.Println(err)}`
+import ("context"; "fmt"; "github.com/chickinfry/chickinfry-go")
+func main(){` + registration + `;transport,err:=chickinfry.NewHTTPTransport("http://127.0.0.1:1");if err==nil{err=transport.Invoke(ctx,"catalog.create",map[string]string{},&struct{}{})};fmt.Println(err)}`
 		file := filepath.Join(root, name+".go")
 		binary := filepath.Join(root, name)
 		if err := os.WriteFile(file, []byte(source), 0600); err != nil {
@@ -28,7 +28,7 @@ func main(){` + registration + `;transport,err:=chik.NewHTTP("http://127.0.0.1:1
 		if !tagged {
 			// nm alone misses exported APIs eliminated as unused by the linker.
 			probe := filepath.Join(root, "unavailable.go")
-			probeSource := strings.Replace(source, registration, `ctx := chik.WithConformanceHooks(context.Background(), "call:symbol", chik.ConformanceHooks{}); fmt.Println(chik.ConformanceStoreRevision(new(chik.MemoryStore)))`, 1)
+			probeSource := strings.Replace(source, registration, `ctx := chickinfry.WithConformanceHooks(context.Background(), "call:symbol", chickinfry.ConformanceHooks{}); fmt.Println(chickinfry.ConformanceStoreRevision(new(chickinfry.MemoryStore)))`, 1)
 			if err := os.WriteFile(probe, []byte(probeSource), 0600); err != nil {
 				t.Fatal(err)
 			}
@@ -36,10 +36,10 @@ func main(){` + registration + `;transport,err:=chik.NewHTTP("http://127.0.0.1:1
 			if err == nil {
 				t.Fatal("default build declares the conformance API")
 			}
-			if !strings.Contains(string(output), "undefined: chik.WithConformanceHooks") {
+			if !strings.Contains(string(output), "undefined: chickinfry.WithConformanceHooks") {
 				t.Fatalf("default API probe failed for another reason: %s", output)
 			}
-			if !strings.Contains(string(output), "undefined: chik.ConformanceStoreRevision") {
+			if !strings.Contains(string(output), "undefined: chickinfry.ConformanceStoreRevision") {
 				t.Fatalf("default build declares the store revision API: %s", output)
 			}
 		}

@@ -1,8 +1,7 @@
-package chik
+package chickinfry
 
 import (
 	"context"
-	"errors"
 	"sync"
 )
 
@@ -31,7 +30,7 @@ func (store *MemoryStore) Credentials() SessionCredentials {
 // the same credentials as the previous session.
 func (store *MemoryStore) Set(credentials SessionCredentials) error {
 	if !validCredentials(credentials) {
-		return errors.New("invalid session credential")
+		return &ClientError{Code: CodeInvalidArgument, Message: "invalid session credential"}
 	}
 	store.mu.Lock()
 	defer store.mu.Unlock()
@@ -47,28 +46,28 @@ func (store *MemoryStore) Refresh(ctx context.Context, operation func(context.Co
 	store.refreshMu.Lock()
 	defer store.refreshMu.Unlock()
 	if err := ctx.Err(); err != nil {
-		return SessionCredentials{}, err
+		return SessionCredentials{}, sessionError(err, false)
 	}
 	store.mu.Lock()
 	latest, revision := store.credentials, store.revision
 	store.mu.Unlock()
 	if latest == (SessionCredentials{}) {
-		return SessionCredentials{}, &OperationError{Code: "invalid_token", Status: 401}
+		return SessionCredentials{}, &ClientError{Code: CodeUnauthenticated, Message: "session is empty"}
 	}
 	refreshed, err := operation(ctx, latest)
 	if err != nil {
-		return SessionCredentials{}, err
+		return SessionCredentials{}, sessionError(err, true)
 	}
 	if err := ctx.Err(); err != nil {
-		return SessionCredentials{}, err
+		return SessionCredentials{}, sessionError(err, true)
 	}
 	if !validCredentials(refreshed) {
-		return SessionCredentials{}, errors.New("invalid refresh response")
+		return SessionCredentials{}, &ClientError{Code: CodeInternal, Message: "invalid refresh response", OutcomeUnknown: true}
 	}
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	if store.revision != revision {
-		return SessionCredentials{}, errors.New("session changed during refresh")
+		return SessionCredentials{}, &ClientError{Code: CodeUnauthenticated, Message: "session changed during refresh", OutcomeUnknown: true}
 	}
 	store.credentials = refreshed
 	store.revision++
@@ -78,7 +77,7 @@ func (store *MemoryStore) Refresh(ctx context.Context, operation func(context.Co
 // Clear atomically removes the session only if the complete credentials match expected.
 func (store *MemoryStore) Clear(ctx context.Context, expected SessionCredentials) error {
 	if err := ctx.Err(); err != nil {
-		return err
+		return sessionError(err, false)
 	}
 	store.clear(expected)
 	return nil

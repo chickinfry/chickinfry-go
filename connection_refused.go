@@ -1,6 +1,6 @@
 //go:build !plan9
 
-package chik
+package chickinfry
 
 import (
 	"errors"

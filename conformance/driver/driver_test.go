@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	chik "github.com/chickinfry/chickinfry-go"
+	"github.com/chickinfry/chickinfry-go"
 )
 
 const hello = `{"id":"c:hello","command":"handshake","args":{"protocolVersions":[1],"runId":"run","requiredCapabilities":[]}}` + "\n"
@@ -105,7 +105,7 @@ func TestMultiplexedCallsDoNotBlockReader(t *testing.T) {
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
-		done <- Run(ctx, input, writer, strings.NewReader(""), func(ctx context.Context, _ *chik.HTTP, op string, raw json.RawMessage) (any, error) {
+		done <- Run(ctx, input, writer, strings.NewReader(""), func(ctx context.Context, _ *chickinfry.HTTPTransport, op string, raw json.RawMessage) (any, error) {
 			entered <- op
 			wait := first
 			if op == "second" {
@@ -167,7 +167,7 @@ func TestSDKErrorNormalization(t *testing.T) {
 	results, err := execute(t, hello+command("c:invalid-origin", "client.create", map[string]any{
 		"clientRef": "client", "origin": "http://localhost", "fixture": "plain", "requestTimeoutMs": 1000,
 	}), "", nil)
-	if err != nil || len(results) != 2 || results[1].Error == nil || results[1].Error.Kind != "sdk" || results[1].Error.Code != nil {
+	if err != nil || len(results) != 2 || results[1].Error == nil || results[1].Error.Kind != "sdk" || (results[1].Error.Code == nil || *results[1].Error.Code != "invalid_argument") {
 		t.Fatalf("unstructured SDK constructor failure lost: %+v %v", results, err)
 	}
 	results, err = execute(t, hello+command("c:empty-origin", "client.create", map[string]any{
@@ -182,12 +182,14 @@ func TestSDKErrorNormalization(t *testing.T) {
 		status  *int
 		unknown *bool
 	}{
-		{fmt.Errorf("wrapped: %w", &chik.OperationError{Code: "conflict", Status: 409}), new("conflict"), new(409), nil},
+		{&chickinfry.ClientError{Code: chickinfry.CodeDeadlineExceeded, OutcomeUnknown: true}, new("deadline_exceeded"), nil, new(true)},
+		{&chickinfry.ClientError{Code: chickinfry.CodeInternal, Status: new(202), OutcomeUnknown: true}, new("internal"), new(202), new(true)},
+		{fmt.Errorf("wrapped: %w", &chickinfry.OperationError{Code: "conflict", Status: 409}), new("conflict"), new(409), nil},
 		{errors.New("invalid_token HTTP 401 SECRET"), nil, nil, nil},
 		{errors.New("timeout SECRET"), nil, nil, nil},
-		{&chik.OperationError{Code: "server SECRET", Status: 503}, nil, new(503), nil},
-		{&chik.OperationError{Code: "conflict", Status: 99}, new("conflict"), nil, nil},
-		{&chik.OperationError{Code: "conflict", Status: 600}, new("conflict"), nil, nil},
+		{&chickinfry.OperationError{Code: "server SECRET", Status: 503}, nil, new(503), nil},
+		{&chickinfry.OperationError{Code: "conflict", Status: 99}, new("conflict"), nil, nil},
+		{&chickinfry.OperationError{Code: "conflict", Status: 600}, new("conflict"), nil, nil},
 	} {
 		got := normalize(tc.err)
 		data, _ := json.Marshal(got)
@@ -198,7 +200,7 @@ func TestSDKErrorNormalization(t *testing.T) {
 	}
 	control := hello + command("c:create", "client.create", map[string]any{"clientRef": "client", "origin": "https://example.test", "fixture": "plain", "requestTimeoutMs": 1000}) +
 		command("c:call", "client.call", map[string]any{"clientRef": "client", "operation": "probe.echo", "input": map[string]any{}})
-	results, err = execute(t, control, "", func(ctx context.Context, _ *chik.HTTP, _ string, _ json.RawMessage) (any, error) {
+	results, err = execute(t, control, "", func(ctx context.Context, _ *chickinfry.HTTPTransport, _ string, _ json.RawMessage) (any, error) {
 		return nil, errors.New("timeout contains sensitive details")
 	})
 	if err != nil || len(results) != 3 || results[2].Error.OutcomeUnknown != nil {
@@ -212,7 +214,7 @@ func TestReferencesAndSecretOutput(t *testing.T) {
 	control := hello + command("c:create", "client.create", map[string]any{"clientRef": "client", "origin": "https://example.test", "fixture": "plain", "requestTimeoutMs": 1000}) +
 		command("c:invalid", "client.copy", map[string]any{"sourceClientRef": "client", "clientRef": "signed", "bearerRef": "missing"}) +
 		command("c:call", "client.call", map[string]any{"clientRef": "client", "operation": "auth.refresh", "input": map[string]any{}, "inputRefs": map[string]string{"refresh_token": "access"}, "outputRefs": map[string]string{"access_token": "next"}})
-	results, err := execute(t, control, protected, func(_ context.Context, _ *chik.HTTP, _ string, raw json.RawMessage) (any, error) {
+	results, err := execute(t, control, protected, func(_ context.Context, _ *chickinfry.HTTPTransport, _ string, raw json.RawMessage) (any, error) {
 		if !bytes.Contains(raw, []byte(secret)) {
 			t.Error("credential input reference not resolved")
 		}

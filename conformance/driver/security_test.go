@@ -15,10 +15,10 @@ import (
 	"testing"
 	"time"
 
-	chik "github.com/chickinfry/chickinfry-go"
+	"github.com/chickinfry/chickinfry-go"
 )
 
-func runtimeCall(ctx context.Context, transport *chik.HTTP, operation string, input json.RawMessage) (any, error) {
+func runtimeCall(ctx context.Context, transport *chickinfry.HTTPTransport, operation string, input json.RawMessage) (any, error) {
 	var output map[string]any
 	err := transport.Invoke(ctx, operation, input, &output)
 	return output, err
@@ -138,8 +138,8 @@ func TestShutdownJoinsRefreshAfterDeadline(t *testing.T) {
 			t.Cleanup(func() { control.Close(); input.Close() })
 			output := &observedWriter{responses: make(chan response, 16)}
 			done := make(chan error, 1)
-			session := &testOnlyStore{current: chik.SessionCredentials{AccessToken: strings.Repeat("A", 43), RefreshToken: strings.Repeat("B", 43)}}
-			transport, err := chik.NewHTTPWithTimeout(peer.URL, 30*time.Second)
+			session := &testOnlyStore{current: chickinfry.SessionCredentials{AccessToken: strings.Repeat("A", 43), RefreshToken: strings.Repeat("B", 43)}}
+			transport, err := chickinfry.NewHTTPTransport(peer.URL, chickinfry.WithTimeout(30*time.Second))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -149,7 +149,7 @@ func TestShutdownJoinsRefreshAfterDeadline(t *testing.T) {
 			}
 			finished := make(chan struct{})
 			go func() {
-				done <- Run(ctx, input, output, strings.NewReader(protectedTokens()), func(ctx context.Context, _ *chik.HTTP, operation string, raw json.RawMessage) (any, error) {
+				done <- Run(ctx, input, output, strings.NewReader(protectedTokens()), func(ctx context.Context, _ *chickinfry.HTTPTransport, operation string, raw json.RawMessage) (any, error) {
 					defer close(finished)
 					return runtimeCall(ctx, transport, operation, raw)
 				})
@@ -203,7 +203,7 @@ func TestShutdownJoinsRefreshAfterDeadline(t *testing.T) {
 				t.Fatal("late response after deadline")
 			default:
 			}
-			if session.Credentials() != (chik.SessionCredentials{}) {
+			if session.Credentials() != (chickinfry.SessionCredentials{}) {
 				t.Fatal("actual Clear did not precede exit")
 			}
 
@@ -240,7 +240,7 @@ func TestConcurrentCompletionsKeepWholeStdoutLines(t *testing.T) {
 	output := &fragmentedWriter{}
 	done := make(chan error, 1)
 	go func() {
-		done <- Run(t.Context(), strings.NewReader(control), output, strings.NewReader(""), func(context.Context, *chik.HTTP, string, json.RawMessage) (any, error) {
+		done <- Run(t.Context(), strings.NewReader(control), output, strings.NewReader(""), func(context.Context, *chickinfry.HTTPTransport, string, json.RawMessage) (any, error) {
 			entered <- struct{}{}
 			<-release
 			return map[string]any{"value": strings.Repeat("x", 1024)}, nil
@@ -274,15 +274,15 @@ func TestConcurrentCompletionsKeepWholeStdoutLines(t *testing.T) {
 // This test double has no conditional Clear or shared-refresh policy.
 type testOnlyStore struct {
 	mu      sync.Mutex
-	current chik.SessionCredentials
+	current chickinfry.SessionCredentials
 }
 
-func (s *testOnlyStore) Credentials() chik.SessionCredentials {
+func (s *testOnlyStore) Credentials() chickinfry.SessionCredentials {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.current
 }
-func (s *testOnlyStore) Refresh(ctx context.Context, operation func(context.Context, chik.SessionCredentials) (chik.SessionCredentials, error)) (chik.SessionCredentials, error) {
+func (s *testOnlyStore) Refresh(ctx context.Context, operation func(context.Context, chickinfry.SessionCredentials) (chickinfry.SessionCredentials, error)) (chickinfry.SessionCredentials, error) {
 	value, err := operation(ctx, s.Credentials())
 	if err == nil {
 		s.mu.Lock()
@@ -291,9 +291,9 @@ func (s *testOnlyStore) Refresh(ctx context.Context, operation func(context.Cont
 	}
 	return value, err
 }
-func (s *testOnlyStore) Clear(context.Context, chik.SessionCredentials) error {
+func (s *testOnlyStore) Clear(context.Context, chickinfry.SessionCredentials) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.current = chik.SessionCredentials{}
+	s.current = chickinfry.SessionCredentials{}
 	return nil
 }

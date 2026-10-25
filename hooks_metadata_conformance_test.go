@@ -1,6 +1,6 @@
 //go:build chik_conformance
 
-package chik
+package chickinfry
 
 import (
 	"context"
@@ -51,7 +51,7 @@ func TestConstructorCounterMeasuresConstructionWindow(t *testing.T) {
 					counted = transport.(*conformanceNetworkTransport).counter.entries.Load()
 				}
 			}
-			transport, observation, err := ConformanceNewHTTPWithTimeout(peer.URL, time.Second)
+			transport, observation, err := ConformanceNewHTTPTransport(peer.URL, WithTimeout(time.Second))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -75,7 +75,7 @@ func TestConstructorCounterCoversSDKNetworkPath(t *testing.T) {
 	}))
 	defer peer.Close()
 	for _, origin := range []string{peer.URL, "http://localhost", "https://example.test"} {
-		transport, observation, err := ConformanceNewHTTPWithTimeout(origin, time.Second)
+		transport, observation, err := ConformanceNewHTTPTransport(origin, WithTimeout(time.Second))
 		if observation.NetworkRequests != 0 || requests.Load() != 0 {
 			t.Fatal("constructor made network requests")
 		}
@@ -161,7 +161,7 @@ func TestJoinedRefreshFailureDoesNotReuseOriginalStatusOrOutcome(t *testing.T) {
 	results := make(chan ConformanceResultEvent, 2)
 	var workers sync.WaitGroup
 	for _, callID := range []string{"c:first", "c:second"} {
-		transport, _, err := ConformanceNewHTTPWithTimeout(peer.URL, time.Second)
+		transport, _, err := ConformanceNewHTTPTransport(peer.URL, WithTimeout(time.Second))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -242,7 +242,7 @@ func TestRuntimeErrorMetadataPreservesUnavailableOutcome(t *testing.T) {
 				io.WriteString(w, test.body)
 			}))
 			defer peer.Close()
-			transport, _, err := ConformanceNewHTTPWithTimeout(peer.URL, time.Second)
+			transport, _, err := ConformanceNewHTTPTransport(peer.URL, WithTimeout(time.Second))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -267,7 +267,7 @@ func (connection conformanceZeroWriteConn) Write([]byte) (int, error) {
 func TestTrackedConnectionWriteFailureReportsKnownOutcome(t *testing.T) {
 	client, peer := net.Pipe()
 	t.Cleanup(func() { client.Close(); peer.Close() })
-	transport, err := NewHTTPWithTimeout("http://127.0.0.1", time.Second)
+	transport, err := NewHTTPTransport("http://127.0.0.1", WithTimeout(time.Second))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -327,7 +327,7 @@ func TestRefreshFailureReportsObservedUnknownOutcome(t *testing.T) {
 				io.WriteString(w, `{"error":"invalid_token"}`)
 			}))
 			defer peer.Close()
-			transport, _, err := ConformanceNewHTTPWithTimeout(peer.URL, time.Second)
+			transport, _, err := ConformanceNewHTTPTransport(peer.URL, WithTimeout(time.Second))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -364,7 +364,7 @@ func TestRefreshFailureReportsObservedUnknownOutcome(t *testing.T) {
 				ConformanceHooks{Result: func(event ConformanceResultEvent) { observed = event }},
 			)
 			err = transport.Invoke(ctx, "probe.echo", map[string]any{}, &map[string]any{})
-			if !isInvalidToken(err) || refreshes.Load() != 1 || store.Credentials() != credentials {
+			if !isBlockedRefresh(err) || refreshes.Load() != 1 || store.Credentials() != credentials {
 				t.Fatal("lost refresh was retried or changed the session")
 			}
 			if observed.OutcomeUnknown == nil || !*observed.OutcomeUnknown {
@@ -375,7 +375,7 @@ func TestRefreshFailureReportsObservedUnknownOutcome(t *testing.T) {
 }
 
 func TestBlockedRefreshPreservesUnobservedTransmission(t *testing.T) {
-	transport, err := NewHTTP("https://fixture.example")
+	transport, err := NewHTTPTransport("https://fixture.example")
 	if err != nil {
 		t.Fatal(err)
 	}

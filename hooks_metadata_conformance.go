@@ -1,6 +1,6 @@
 //go:build chik_conformance
 
-package chik
+package chickinfry
 
 import (
 	"context"
@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"net/http/httptrace"
 	"sync/atomic"
-	"time"
 )
 
 type conformanceNetworkCounter struct{ entries atomic.Int64 }
@@ -60,14 +59,14 @@ func (transport *conformanceNetworkTransport) CloseIdleConnections() {
 // conformanceConstructorTransportHook lets package tests enter the counted path during construction.
 var conformanceConstructorTransportHook func(http.RoundTripper)
 
-// ConformanceNewHTTPWithTimeout counts network entries from constructor start to return.
+// ConformanceNewHTTPTransport counts network entries from constructor start to return.
 // RoundTrip, DialContext, optional DialTLSContext, and DNS trace callbacks cover the
 // cloned transport used by the SDK's sole client.Do path; construction uses no
 // separate client, resolver or socket. Later calls retain this counter.
-func ConformanceNewHTTPWithTimeout(origin string, timeout time.Duration) (*HTTP, ConformanceResultEvent, error) {
+func ConformanceNewHTTPTransport(origin string, options ...HTTPTransportOption) (*HTTPTransport, ConformanceResultEvent, error) {
 	counter := new(conformanceNetworkCounter)
 	before := counter.entries.Load()
-	transport, err := newHTTPWithTimeout(origin, timeout, func(transport *http.Transport) http.RoundTripper {
+	transport, err := newHTTP(origin, options, func(transport *http.Transport) http.RoundTripper {
 		observed := counter.wrap(transport)
 		if conformanceConstructorTransportHook != nil {
 			conformanceConstructorTransportHook(observed)
@@ -127,6 +126,9 @@ func conformanceResult(ctx context.Context, result error) {
 
 func conformanceRawDetails(result error) *bool {
 	visible := result.Error()
+	if _, ok := errors.AsType[*ClientError](result); ok {
+		return new(false)
+	}
 	if transport, ok := errors.AsType[*transportError](result); ok {
 		switch transport.class {
 		case "context canceled", "deadline exceeded", "timeout", "connection refused", "tls handshake failed", "malformed HTTP response", "network error":
@@ -139,7 +141,7 @@ func conformanceRawDetails(result error) *bool {
 	}
 	// These runtime-owned messages discard the underlying decoder/body error.
 	switch visible {
-	case "invalid operation name", "invalid operation request", "operation request is too large", "operation response is too large", "could not read operation response", "invalid operation response", "invalid refresh response", "operation timeout must be positive", "invalid operation endpoint", "operation endpoint must be an HTTPS or loopback HTTP origin", "default transport is not a standard *http.Transport; required to bound response buffering":
+	case "invalid operation name", "invalid operation request", "operation request is too large", "operation response is too large", "could not read operation response", "invalid operation response", "invalid refresh response", "redirect not allowed", "operation timeout must be positive", "invalid operation endpoint", "operation endpoint must be an HTTPS or loopback HTTP origin", "default transport is not a standard *http.Transport; required to bound response buffering":
 		return new(false)
 	}
 	return nil

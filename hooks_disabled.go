@@ -1,6 +1,6 @@
 //go:build !chik_conformance
 
-package chik
+package chickinfry
 
 import (
 	"context"

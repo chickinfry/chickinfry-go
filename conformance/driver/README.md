@@ -119,7 +119,7 @@ work; ordinary decoded calls therefore remain incomplete.
 Generated input models serialize valid declared fields, and the input adapter
 preserves absent/null fields which Go string structs cannot represent. Generated
 output decoders validate complete responses. Time strings stay strings. SDK error
-codes/statuses are taken from structured `OperationError` values; other metadata
+codes/statuses are taken from structured `ClientError` or `OperationError` values; other metadata
 remains unavailable, with no string parsing or invented status/code. Tagged runtime observations report `outcomeUnknown` only where the runtime can
 resolve it; HTTP status alone does not resolve refresh-token consumption. Command
 deadline errors also leave `outcomeUnknown` null because the runtime does not
@@ -155,7 +155,7 @@ descriptor validation against the coordinator-prepared alias modules. Run them
 from a prepared module with the coordinator-owned local replacements.
 
 The root tagged `TestConformanceRetainedBytesOracle` independently checks the
-inventory above through the real `NewHTTP`/`net/http.Transport` path over
+inventory above through the real `NewHTTPTransport`/`net/http.Transport` path over
 `net.Pipe`. A private synchronous probe receives only the actual response and
 SDK array view before headers/read observations. It stores numbers, never
 body views. The oracle counts fixed `Z` bytes in the entire actual `data` array

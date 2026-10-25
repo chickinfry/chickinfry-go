@@ -11,7 +11,7 @@ import (
 
 	auth "chickinfry-client-auth"
 	plain "chickinfry-client-plain"
-	chik "github.com/chickinfry/chickinfry-go"
+	"github.com/chickinfry/chickinfry-go"
 	"github.com/chickinfry/chickinfry-go/conformance/driver"
 )
 
@@ -35,7 +35,7 @@ func main() {
 // inputTransport preserves JSON presence that generated string input structs cannot represent.
 // Valid declared fields still serialize through the generated SDK's input model.
 type inputTransport struct {
-	http  *chik.HTTP
+	http  *chickinfry.HTTPTransport
 	input json.RawMessage
 }
 
@@ -62,7 +62,7 @@ func (t inputTransport) Invoke(ctx context.Context, operation string, input any,
 	return t.http.Invoke(ctx, operation, fields, output)
 }
 
-func call(ctx context.Context, transport *chik.HTTP, operation string, input json.RawMessage) (any, error) {
+func call(ctx context.Context, transport *chickinfry.HTTPTransport, operation string, input json.RawMessage) (any, error) {
 	switch driver.Fixture(ctx) {
 	case "plain":
 		return callPlain(ctx, transport, operation, input)
@@ -73,7 +73,7 @@ func call(ctx context.Context, transport *chik.HTTP, operation string, input jso
 	}
 }
 
-func callPlain(ctx context.Context, transport *chik.HTTP, operation string, input json.RawMessage) (any, error) {
+func callPlain(ctx context.Context, transport *chickinfry.HTTPTransport, operation string, input json.RawMessage) (any, error) {
 	client := plain.New(inputTransport{http: transport, input: input})
 	switch operation {
 	case "probe.echo":
@@ -93,7 +93,7 @@ func callPlain(ctx context.Context, transport *chik.HTTP, operation string, inpu
 	}
 }
 
-func callAuth(ctx context.Context, transport *chik.HTTP, operation string, input json.RawMessage) (any, error) {
+func callAuth(ctx context.Context, transport *chickinfry.HTTPTransport, operation string, input json.RawMessage) (any, error) {
 	client := auth.New(inputTransport{http: transport, input: input})
 	switch operation {
 	case "probe.echo":

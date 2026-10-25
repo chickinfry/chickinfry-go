@@ -1,4 +1,4 @@
-package chik
+package chickinfry
 
 import (
 	"crypto/sha256"
@@ -42,13 +42,13 @@ func TestHTTPRefreshStateAcrossMemoryStores(t *testing.T) {
 				}
 			}))
 			defer peer.Close()
-			transport, err := NewHTTP(peer.URL)
+			transport, err := NewHTTPTransport(peer.URL)
 			if err != nil {
 				t.Fatal(err)
 			}
 			defer transport.client.CloseIdleConnections()
 			stores := []*MemoryStore{new(MemoryStore), new(MemoryStore)}
-			clients := make([]*HTTP, len(stores))
+			clients := make([]*HTTPTransport, len(stores))
 			for i, store := range stores {
 				if err := store.Set(original); err != nil {
 					t.Fatal(err)
@@ -86,7 +86,7 @@ func TestHTTPRefreshStateAcrossMemoryStores(t *testing.T) {
 				t.Fatal(err)
 			}
 			for i, client := range clients {
-				if err := client.Invoke(t.Context(), "catalog.create", map[string]string{}, &struct{}{}); !isInvalidToken(err) {
+				if err := client.Invoke(t.Context(), "catalog.create", map[string]string{}, &struct{}{}); !isBlockedRefresh(err) {
 					t.Fatalf("store %d reused a possibly consumed refresh token: %v", i, err)
 				}
 				if stores[i].Credentials() != original || attempts.Load() != 1 {

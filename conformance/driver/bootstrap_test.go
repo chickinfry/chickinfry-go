@@ -14,7 +14,7 @@ import (
 	"strings"
 	"testing"
 
-	chik "github.com/chickinfry/chickinfry-go"
+	"github.com/chickinfry/chickinfry-go"
 )
 
 func TestCredentialBootstrapLimits(t *testing.T) {
@@ -131,7 +131,7 @@ func TestClientFixtureIsExplicitAndCopyPreservesIt(t *testing.T) {
 			control += command("c:copy", "client.copy", map[string]any{"sourceClientRef": "client", "clientRef": "copy", "bearerRef": "access"}) +
 				command("c:call", "client.call", map[string]any{"clientRef": "copy", "operation": "probe.echo", "input": map[string]any{}})
 			selected := ""
-			results, err := execute(t, control, protectedTokens(), func(ctx context.Context, _ *chik.HTTP, _ string, _ json.RawMessage) (any, error) {
+			results, err := execute(t, control, protectedTokens(), func(ctx context.Context, _ *chickinfry.HTTPTransport, _ string, _ json.RawMessage) (any, error) {
 				selected = Fixture(ctx)
 				return map[string]any{}, nil
 			})
@@ -244,12 +244,12 @@ func TestRefreshHTTPStatusDoesNotResolveUnknownOutcome(t *testing.T) {
 				io.WriteString(w, `{"error":"invalid_token"}`)
 			}))
 			defer peer.Close()
-			transport, err := chik.NewHTTP(peer.URL)
+			transport, err := chickinfry.NewHTTPTransport(peer.URL)
 			if err != nil {
 				t.Fatal("runtime transport construction failed")
 			}
-			store := &chik.MemoryStore{}
-			if err := store.Set(chik.SessionCredentials{AccessToken: access, RefreshToken: refresh, ExpiresAt: "2099-01-01T00:00:00Z", RefreshExpiresAt: "2099-02-01T00:00:00Z", UserID: "user", SessionID: "session"}); err != nil {
+			store := &chickinfry.MemoryStore{}
+			if err := store.Set(chickinfry.SessionCredentials{AccessToken: access, RefreshToken: refresh, ExpiresAt: "2099-01-01T00:00:00Z", RefreshExpiresAt: "2099-02-01T00:00:00Z", UserID: "user", SessionID: "session"}); err != nil {
 				t.Fatal("runtime store setup failed")
 			}
 			transport, err = transport.WithSession(store)

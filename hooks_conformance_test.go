@@ -1,6 +1,6 @@
 //go:build chik_conformance
 
-package chik
+package chickinfry
 
 import (
 	"bufio"
@@ -101,7 +101,7 @@ func TestConformanceRetainedBytesOracle(t *testing.T) {
 						t.Errorf("pipe peer: %v", err)
 					}
 				})
-				transport, err := NewHTTP("http://127.0.0.1")
+				transport, err := NewHTTPTransport("http://127.0.0.1")
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -305,7 +305,7 @@ func TestConformanceTransportPhasesAndRealBuffers(t *testing.T) {
 				fmt.Fprint(response, "{}"+strings.Repeat(" ", test.size-2))
 			}))
 			defer server.Close()
-			transport, err := NewHTTP(server.URL)
+			transport, err := NewHTTPTransport(server.URL)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -419,7 +419,7 @@ func TestConformanceCancellationPhases(t *testing.T) {
 	}))
 	defer server.Close()
 	defer unblock()
-	transport, err := NewHTTP(server.URL)
+	transport, err := NewHTTPTransport(server.URL)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -454,7 +454,7 @@ func TestConformanceCancellationPhases(t *testing.T) {
 func TestConformanceUnmeasurableTransportIsExplicit(t *testing.T) {
 	server := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) { fmt.Fprint(response, "{}") }))
 	defer server.Close()
-	transport, err := NewHTTP(server.URL)
+	transport, err := NewHTTPTransport(server.URL)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -474,7 +474,7 @@ func TestConformanceUnmeasurableTransportIsExplicit(t *testing.T) {
 func TestConformanceRefreshBarriersAndClearTrace(t *testing.T) {
 	store := newRefreshStore()
 	original := store.Credentials()
-	transport, err := NewHTTP("http://127.0.0.1")
+	transport, err := NewHTTPTransport("http://127.0.0.1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -539,12 +539,14 @@ func TestConformanceRefreshJoinUsesTheSameOpaqueReference(t *testing.T) {
 	}
 	defer end()
 	go func() {
-		_, err := flights.Do(leader, refreshKey{token: token}, func() (string, error) { close(started); <-release; return "", nil })
+		_, err := flights.Do(leader, refreshKey{token: token}, func() (SessionCredentials, error) { close(started); <-release; return SessionCredentials{}, nil })
 		results <- err
 	}()
 	<-started
 	go func() {
-		_, err := flights.Do(follower, refreshKey{token: token}, func() (string, error) { return "", errors.New("unexpected second flight") })
+		_, err := flights.Do(follower, refreshKey{token: token}, func() (SessionCredentials, error) {
+			return SessionCredentials{}, errors.New("unexpected second flight")
+		})
 		results <- err
 	}()
 	<-joined
@@ -576,8 +578,8 @@ func TestConformanceIndependentRefreshFlightsHaveDistinctReferences(t *testing.T
 		if err != nil {
 			t.Fatal(err)
 		}
-		_, err = store.refreshes.Do(ctx, refreshKey{token: token}, func() (string, error) {
-			return "", conformanceRefreshSent(ctx)
+		_, err = store.refreshes.Do(ctx, refreshKey{token: token}, func() (SessionCredentials, error) {
+			return SessionCredentials{}, conformanceRefreshSent(ctx)
 		})
 		finish()
 		if err != nil {
@@ -784,7 +786,7 @@ func TestConformanceMemoryStoreClientsJoinOneRefresh(t *testing.T) {
 	}
 	results := make(chan error, 2)
 	for _, callID := range []string{"call:first", "call:second"} {
-		transport, err := NewHTTP(server.URL)
+		transport, err := NewHTTPTransport(server.URL)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -874,7 +876,7 @@ func TestConformanceResponseLimitPerExchange(t *testing.T) {
 				io.WriteString(response, body)
 			}))
 			defer server.Close()
-			transport, err := NewHTTP(server.URL)
+			transport, err := NewHTTPTransport(server.URL)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -937,7 +939,7 @@ func TestConformanceAutoRefreshExchangeProjection(t *testing.T) {
 		fmt.Fprint(response, `{"error":"invalid_token"}`)
 	}))
 	defer server.Close()
-	transport, err := NewHTTP(server.URL)
+	transport, err := NewHTTPTransport(server.URL)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1010,7 +1012,7 @@ func TestConformanceIndependentClientsDoNotInferRefreshSharing(t *testing.T) {
 			}))
 			defer server.Close()
 			defer unblock()
-			first, err := NewHTTP(server.URL)
+			first, err := NewHTTPTransport(server.URL)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1018,7 +1020,7 @@ func TestConformanceIndependentClientsDoNotInferRefreshSharing(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			second, err := NewHTTP(server.URL)
+			second, err := NewHTTPTransport(server.URL)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1079,7 +1081,7 @@ func TestConformanceOverflowReadImmediatelyPublishesLimit(t *testing.T) {
 	}))
 	defer server.Close()
 	defer unblock()
-	transport, err := NewHTTP(server.URL)
+	transport, err := NewHTTPTransport(server.URL)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1170,7 +1172,7 @@ func TestConformanceOtherUnauthorizedErrorDoesNotRefresh(t *testing.T) {
 		writeRefreshResponse(t, response, 401, map[string]string{"error": "not_authorized"})
 	}))
 	defer server.Close()
-	transport, err := NewHTTP(server.URL)
+	transport, err := NewHTTPTransport(server.URL)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1212,7 +1214,7 @@ func TestConformanceInitiatorBarrierDoesNotBlockRequestSend(t *testing.T) {
 				entered := make(chan struct{})
 				release := make(chan struct{})
 				unblock := sync.OnceFunc(func() { close(release) })
-				transport, err := NewHTTP("http://127.0.0.1")
+				transport, err := NewHTTPTransport("http://127.0.0.1")
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -1363,7 +1365,7 @@ func TestConformanceCanceledCallPreservesSharedExchangeObservation(t *testing.T)
 	}))
 	defer server.Close()
 	defer unblock()
-	transport, err := NewHTTP(server.URL)
+	transport, err := NewHTTPTransport(server.URL)
 	if err != nil {
 		t.Fatal(err)
 	}

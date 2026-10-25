@@ -16,7 +16,7 @@ import (
 	"testing"
 
 	plain "chickinfry-client-plain"
-	chik "github.com/chickinfry/chickinfry-go"
+	"github.com/chickinfry/chickinfry-go"
 	"github.com/chickinfry/chickinfry-go/conformance/driver"
 )
 
@@ -34,7 +34,7 @@ func TestGeneratedFixtureBridges(t *testing.T) {
 		}
 	}))
 	defer peer.Close()
-	transport, err := chik.NewHTTP(peer.URL)
+	transport, err := chickinfry.NewHTTPTransport(peer.URL)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,7 +90,7 @@ func TestGeneratedInputKeepsAbsentAndNull(t *testing.T) {
 		io.WriteString(w, `{"wire_value":"ok","observed_at":"unchanged"}`)
 	}))
 	defer peer.Close()
-	transport, err := chik.NewHTTP(peer.URL)
+	transport, err := chickinfry.NewHTTPTransport(peer.URL)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -119,12 +119,12 @@ func TestGeneratedMalformedSuccessResponses(t *testing.T) {
 				io.WriteString(w, body)
 			}))
 			defer peer.Close()
-			transport, err := chik.NewHTTP(peer.URL)
+			transport, err := chickinfry.NewHTTPTransport(peer.URL)
 			if err != nil {
 				t.Fatal(err)
 			}
 			output, err := plain.New(transport).Probe.Echo(t.Context(), plain.ProbeEchoInput{WireValue: "ok"})
-			failure, ok := errors.AsType[*chik.OperationError](err)
+			failure, ok := errors.AsType[*chickinfry.OperationError](err)
 			if !ok || failure.Code != "invalid_response" || failure.Status != http.StatusAccepted || output != (plain.ProbeEchoOutput{}) {
 				t.Fatalf("malformed success error=%v, output=%+v", err, output)
 			}

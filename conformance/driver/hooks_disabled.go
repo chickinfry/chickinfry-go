@@ -6,12 +6,12 @@ import (
 	"context"
 	"time"
 
-	chik "github.com/chickinfry/chickinfry-go"
+	"github.com/chickinfry/chickinfry-go"
 )
 
 func supportsTransport() bool { return false }
-func newHTTP(origin string, timeout time.Duration) (*chik.HTTP, *int64, *Error) {
-	transport, err := chik.NewHTTPWithTimeout(origin, timeout)
+func newHTTP(origin string, timeout time.Duration) (*chickinfry.HTTPTransport, *int64, *Error) {
+	transport, err := chickinfry.NewHTTPTransport(origin, chickinfry.WithTimeout(timeout))
 	if err != nil {
 		return nil, nil, normalize(err)
 	}

@@ -1,6 +1,6 @@
 //go:build chik_conformance
 
-package chik
+package chickinfry
 
 import (
 	"net"
@@ -31,6 +31,8 @@ type conformanceConn struct {
 	onRequestSent                   func()
 	requestBytes                    atomic.Int64
 }
+
+func (connection *conformanceConn) NetConn() net.Conn { return connection.Conn }
 
 func (connection *conformanceConn) Write(buffer []byte) (int, error) {
 	n, err := connection.Conn.Write(buffer)

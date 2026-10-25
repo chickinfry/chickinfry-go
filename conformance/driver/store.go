@@ -3,14 +3,14 @@ package driver
 import (
 	"encoding/json"
 
-	chik "github.com/chickinfry/chickinfry-go"
+	"github.com/chickinfry/chickinfry-go"
 )
 
 type callKey struct{}
 type storeKey struct{}
 
 type storeBinding struct {
-	memory           *chik.MemoryStore
+	memory           *chickinfry.MemoryStore
 	origin           string
 	clearAttempts    []observedClear
 	traceUnavailable bool
@@ -35,7 +35,7 @@ func (s *server) sessionStore(req request, a args) *Error {
 		if store != nil {
 			return failure("driver", "invalid_reference")
 		}
-		store = &storeBinding{memory: new(chik.MemoryStore), origin: a.Origin, clearAttempts: []observedClear{}}
+		store = &storeBinding{memory: new(chickinfry.MemoryStore), origin: a.Origin, clearAttempts: []observedClear{}}
 	} else if store == nil {
 		return failure("driver", "invalid_reference")
 	}
@@ -74,10 +74,10 @@ func (s *server) sessionStore(req request, a args) *Error {
 		if data.Origin != store.origin || data.AccessToken != access || data.RefreshToken != refresh {
 			return failure("driver", "invalid_args")
 		}
-		if _, err := chik.NewHTTP(store.origin); err != nil {
+		if _, err := chickinfry.NewHTTPTransport(store.origin); err != nil {
 			return failure("driver", "invalid_args")
 		}
-		if err := store.memory.Set(chik.SessionCredentials{AccessToken: data.AccessToken, RefreshToken: data.RefreshToken, ExpiresAt: data.ExpiresAt, RefreshExpiresAt: data.RefreshExpiresAt, UserID: data.UserID, SessionID: data.SessionID}); err != nil {
+		if err := store.memory.Set(chickinfry.SessionCredentials{AccessToken: data.AccessToken, RefreshToken: data.RefreshToken, ExpiresAt: data.ExpiresAt, RefreshExpiresAt: data.RefreshExpiresAt, UserID: data.UserID, SessionID: data.SessionID}); err != nil {
 			return failure("driver", "invalid_args")
 		}
 		s.stores[a.StoreRef] = store

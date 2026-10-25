@@ -16,13 +16,13 @@ import (
 	"time"
 	"unicode/utf8"
 
-	chik "github.com/chickinfry/chickinfry-go"
+	"github.com/chickinfry/chickinfry-go"
 )
 
 const MaxLineBytes = 16 << 20
 
 // Call invokes a generated typed method, without interpreting suite expectations.
-type Call func(context.Context, *chik.HTTP, string, json.RawMessage) (any, error)
+type Call func(context.Context, *chickinfry.HTTPTransport, string, json.RawMessage) (any, error)
 
 // Error is the sanitized protocol error; unavailable SDK metadata remains null.
 type Error struct {
@@ -52,7 +52,16 @@ func normalize(err error) *Error {
 		return own
 	}
 	e := &Error{Kind: "sdk"}
-	if sdk, ok := errors.AsType[*chik.OperationError](err); ok {
+	if local, ok := errors.AsType[*chickinfry.ClientError](err); ok {
+		code := string(local.Code)
+		if safeCode.MatchString(code) {
+			e.Code = new(code)
+		}
+		e.HTTPStatus = local.Status
+		e.OutcomeUnknown = new(local.OutcomeUnknown)
+		return e
+	}
+	if sdk, ok := errors.AsType[*chickinfry.OperationError](err); ok {
 		if safeCode.MatchString(sdk.Code) {
 			e.Code = new(sdk.Code)
 		}
@@ -186,7 +195,7 @@ func Fixture(ctx context.Context) string {
 }
 
 type clientBinding struct {
-	http    *chik.HTTP
+	http    *chickinfry.HTTPTransport
 	fixture string
 	store   *storeBinding
 }

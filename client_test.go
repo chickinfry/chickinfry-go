@@ -1,4 +1,4 @@
-package chik
+package chickinfry
 
 import (
 	"context"
@@ -65,7 +65,7 @@ func TestHTTPOriginLoopbackSpellings(t *testing.T) {
 		{"https://example.test/", true},
 	} {
 		t.Run(test.origin, func(t *testing.T) {
-			_, err := NewHTTP(test.origin)
+			_, err := NewHTTPTransport(test.origin)
 			if (err == nil) != test.accept {
 				t.Fatalf("origin acceptance = %t, want %t: %v", err == nil, test.accept, err)
 			}
@@ -93,11 +93,18 @@ func TestHTTPClassifiesInvalidErrorResponses(t *testing.T) {
 				fmt.Fprint(response, test.body)
 			}))
 			defer server.Close()
-			transport, err := NewHTTP(server.URL)
+			transport, err := NewHTTPTransport(server.URL)
 			if err != nil {
 				t.Fatal(err)
 			}
 			err = transport.Invoke(t.Context(), "catalog.create", map[string]string{}, &struct{}{})
+			if test.code == "invalid_response" {
+				failure, ok := errors.AsType[*ClientError](err)
+				if !ok || failure.Code != CodeInternal || failure.Status == nil || *failure.Status != http.StatusBadGateway || !failure.OutcomeUnknown {
+					t.Fatal("invalid response lost the local failure boundary")
+				}
+				return
+			}
 			failure, ok := errors.AsType[*OperationError](err)
 			if !ok || failure.Code != test.code || failure.Status != http.StatusBadGateway {
 				t.Fatalf("response classification = %v, want %s / 502", err, test.code)
@@ -208,7 +215,7 @@ func TestHTTPUnknownRefreshOutcomeBlocksReuseAcrossTransports(t *testing.T) {
 			if outcome.name == "timeout" {
 				timeout = 50 * time.Millisecond
 			}
-			transport, err := NewHTTPWithTimeout(server.URL, timeout)
+			transport, err := NewHTTPTransport(server.URL, WithTimeout(timeout))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -224,7 +231,12 @@ func TestHTTPUnknownRefreshOutcomeBlocksReuseAcrossTransports(t *testing.T) {
 			if output.Value != "unchanged" {
 				t.Fatal("failed refresh changed the caller output")
 			}
-			if outcome.status != 0 {
+			if outcome.code == "invalid_response" {
+				failure, ok := errors.AsType[*ClientError](err)
+				if !ok || failure.Code != CodeInternal || failure.Status == nil || *failure.Status != outcome.status || !failure.OutcomeUnknown {
+					t.Fatal("invalid refresh response lost local failure metadata")
+				}
+			} else if outcome.status != 0 {
 				failure, ok := errors.AsType[*OperationError](err)
 				if !ok || failure.Status != outcome.status || failure.Code != outcome.code {
 					t.Fatalf("refresh error = %v, want %s / %d", err, outcome.code, outcome.status)
@@ -233,7 +245,7 @@ func TestHTTPUnknownRefreshOutcomeBlocksReuseAcrossTransports(t *testing.T) {
 					t.Fatal("refresh error exposed response details")
 				}
 			}
-			secondTransport, err := NewHTTP(server.URL)
+			secondTransport, err := NewHTTPTransport(server.URL)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -241,10 +253,10 @@ func TestHTTPUnknownRefreshOutcomeBlocksReuseAcrossTransports(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			for _, client := range []*HTTP{signed, secondSigned} {
+			for _, client := range []*HTTPTransport{signed, secondSigned} {
 				err := client.Invoke(t.Context(), "catalog.create", map[string]string{}, &struct{}{})
-				failure, ok := errors.AsType[*OperationError](err)
-				if !ok || failure.Code != "invalid_token" || failure.Status != http.StatusUnauthorized {
+				failure, ok := errors.AsType[*ClientError](err)
+				if !ok || failure.Code != CodeUnauthenticated || failure.Status != nil || !failure.OutcomeUnknown {
 					t.Fatalf("blocked refresh = %v, want invalid_token / 401", err)
 				}
 			}
@@ -266,15 +278,31 @@ func TestHTTPUnknownRefreshOutcomeBlocksReuseAcrossTransports(t *testing.T) {
 	}
 }
 
+type refreshResultStore struct {
+	SessionStore
+	afterRefresh func(context.Context) error
+}
+
+func (store *refreshResultStore) Refresh(ctx context.Context, operation func(context.Context, SessionCredentials) (SessionCredentials, error)) (SessionCredentials, error) {
+	refreshed, err := store.SessionStore.Refresh(ctx, operation)
+	if err == nil {
+		err = store.afterRefresh(ctx)
+	}
+	return refreshed, err
+}
+
 func TestHTTPRefreshesOnceAndRetriesOnce(t *testing.T) {
-	for _, name := range []string{"memory", "custom pointer", "equal custom value", "custom rejection"} {
+	for _, name := range []string{"memory", "custom pointer", "equal custom value", "custom rejection", "custom tokens only", "tokens-only-persistence", "same-session-next-rotation"} {
 		t.Run(name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				custom := name != "memory"
+				custom := name != "memory" && name != "same-session-next-rotation"
 				rejected := name == "custom rejection"
 				var store SessionStore = new(MemoryStore)
 				original, rotated := newRefreshStore().Credentials(), newRefreshStore().Credentials()
 				rotated.AccessToken = strings.Repeat("c", 43)
+				if name == "custom tokens only" || name == "tokens-only-persistence" {
+					original = SessionCredentials{AccessToken: original.AccessToken, RefreshToken: original.RefreshToken}
+				}
 				var customStore *concurrentRefreshStore
 				if custom {
 					customStore = &concurrentRefreshStore{refreshStore: &refreshStore{credentials: original}}
@@ -284,6 +312,30 @@ func TestHTTPRefreshesOnceAndRetriesOnce(t *testing.T) {
 					}
 				} else if err := store.(*MemoryStore).Set(original); err != nil {
 					t.Fatal(err)
+				}
+				retried, saved := rotated, rotated
+				if name == "tokens-only-persistence" {
+					saved = SessionCredentials{AccessToken: rotated.AccessToken, RefreshToken: rotated.RefreshToken}
+					store = &refreshResultStore{SessionStore: store, afterRefresh: func(context.Context) error {
+						customStore.mu.Lock()
+						defer customStore.mu.Unlock()
+						customStore.credentials = saved
+						return nil
+					}}
+				}
+				if name == "same-session-next-rotation" {
+					retried = newRefreshStore().Credentials()
+					retried.AccessToken = strings.Repeat("d", 43)
+					saved = retried
+					memory := store.(*MemoryStore)
+					store = &refreshResultStore{SessionStore: store, afterRefresh: func(ctx context.Context) error {
+						done := make(chan error, 1)
+						go func() {
+							_, err := memory.Refresh(ctx, func(context.Context, SessionCredentials) (SessionCredentials, error) { return retried, nil })
+							done <- err
+						}()
+						return <-done
+					}}
 				}
 				var refreshes, requests atomic.Int64
 				originals, release := make(chan struct{}), make(chan struct{})
@@ -309,7 +361,7 @@ func TestHTTPRefreshesOnceAndRetriesOnce(t *testing.T) {
 						}
 					} else {
 						requests.Add(1)
-						if request.Header.Get("Authorization") != "Bearer "+rotated.AccessToken {
+						if request.Header.Get("Authorization") != "Bearer "+retried.AccessToken {
 							if request.Header.Get("Authorization") != "Bearer "+original.AccessToken {
 								t.Error("original request used unexpected credentials")
 							}
@@ -321,7 +373,7 @@ func TestHTTPRefreshesOnceAndRetriesOnce(t *testing.T) {
 				})
 				results := make(chan error, 2)
 				for range 2 {
-					transport, err := NewHTTP("https://fixture.example")
+					transport, err := NewHTTPTransport("https://fixture.example")
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -347,12 +399,12 @@ func TestHTTPRefreshesOnceAndRetriesOnce(t *testing.T) {
 						t.Fatalf("shared refresh result=%v, rejected=%t", err, rejected)
 					}
 				}
-				wantRequests, wantCredentials := int64(4), rotated
+				wantRequests, wantCredentials := int64(4), saved
 				if rejected {
 					wantRequests, wantCredentials = 2, SessionCredentials{}
 				}
 				if refreshes.Load() != 1 || requests.Load() != wantRequests || store.Credentials() != wantCredentials {
-					t.Fatalf("refreshes=%d originals=%d credentials=%+v; want 1 refresh, %d originals and expected session", refreshes.Load(), requests.Load(), store.Credentials(), wantRequests)
+					t.Fatalf("refreshes=%d originals=%d; want 1 refresh, %d originals and expected session", refreshes.Load(), requests.Load(), wantRequests)
 				}
 				if custom {
 					if customStore.calls.Load() != 1 {
@@ -392,7 +444,7 @@ func TestHTTPDoesNotRefreshAgainWhenRetryIsRejected(t *testing.T) {
 		writeRefreshResponse(t, response, http.StatusUnauthorized, map[string]string{"error": "invalid_token"})
 	}))
 	defer server.Close()
-	transport, err := NewHTTP(server.URL)
+	transport, err := NewHTTPTransport(server.URL)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -421,7 +473,7 @@ func TestHTTPRefreshFailureEndsSessionWithoutRetryLoop(t *testing.T) {
 		writeRefreshResponse(t, response, http.StatusUnauthorized, map[string]string{"error": "invalid_token"})
 	}))
 	defer server.Close()
-	transport, err := NewHTTP(server.URL)
+	transport, err := NewHTTPTransport(server.URL)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -447,13 +499,13 @@ func TestHTTPRejectsRedirect(t *testing.T) {
 		http.Redirect(response, request, "https://redirect.example", http.StatusTemporaryRedirect)
 	}))
 	defer server.Close()
-	transport, err := NewHTTP(server.URL)
+	transport, err := NewHTTPTransport(server.URL)
 	if err != nil {
 		t.Fatal(err)
 	}
 	err = transport.Invoke(t.Context(), "catalog.create", map[string]string{}, &struct{}{})
-	var operation *OperationError
-	if !errors.As(err, &operation) || operation.Code != "redirect_not_allowed" || operation.Status != http.StatusTemporaryRedirect {
+	operation, ok := errors.AsType[*ClientError](err)
+	if !ok || operation.Code != CodeInternal || operation.Status == nil || *operation.Status != http.StatusTemporaryRedirect {
 		t.Fatalf("redirect was not rejected explicitly: %v", err)
 	}
 }
@@ -477,7 +529,7 @@ func TestHTTPRedactsTransportFailureDetail(t *testing.T) {
 			}))
 			defer server.Close()
 
-			transport, err := NewHTTP(server.URL)
+			transport, err := NewHTTPTransport(server.URL)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -504,7 +556,7 @@ func TestHTTPTransportFailurePreservesCancellation(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}))
 	defer server.Close()
-	transport, err := NewHTTP(server.URL)
+	transport, err := NewHTTPTransport(server.URL)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -514,6 +566,10 @@ func TestHTTPTransportFailurePreservesCancellation(t *testing.T) {
 		cancel()
 	}()
 	err = transport.Invoke(ctx, "catalog.create", map[string]string{}, &struct{}{})
+	failure, ok := errors.AsType[*ClientError](err)
+	if !ok || failure.Code != CodeCanceled || failure.Status != nil || !failure.OutcomeUnknown {
+		t.Fatal("cancellation lost its local classification or transmission state")
+	}
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancellation was not preserved: %v", err)
 	}
@@ -533,7 +589,7 @@ func TestHTTPClassifiesNetworkFailureWithMalformedURLOnly(t *testing.T) {
 	}))
 	defer server.Close()
 
-	transport, err := NewHTTP(server.URL)
+	transport, err := NewHTTPTransport(server.URL)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -546,7 +602,7 @@ func TestHTTPClassifiesNetworkFailureWithMalformedURLOnly(t *testing.T) {
 }
 
 func TestHTTPRedactsIPv6ZoneOriginDetail(t *testing.T) {
-	transport, err := NewHTTP("https://[fe80::1%25fixture-private-zone]")
+	transport, err := NewHTTPTransport("https://[fe80::1%25fixture-private-zone]")
 	if err != nil {
 		t.Fatalf("zone origin was rejected: %v", err)
 	}
@@ -577,7 +633,7 @@ func TestHTTPDoesNotClassifyProxyStatusReasonAsMalformed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	transport := &HTTP{
+	transport := &HTTPTransport{
 		origin: "https://fixture.example",
 		client: &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)}},
 	}
@@ -596,11 +652,15 @@ func TestHTTPAppliesConfiguredTimeout(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}))
 	defer server.Close()
-	transport, err := NewHTTPWithTimeout(server.URL, time.Millisecond)
+	transport, err := NewHTTPTransport(server.URL, WithTimeout(time.Millisecond))
 	if err != nil {
 		t.Fatal(err)
 	}
 	err = transport.Invoke(t.Context(), "catalog.create", map[string]string{}, &struct{}{})
+	failure, ok := errors.AsType[*ClientError](err)
+	if !ok || failure.Code != CodeDeadlineExceeded || failure.Status != nil || !failure.OutcomeUnknown {
+		t.Fatal("timeout lost its local classification or transmission state")
+	}
 	if err == nil {
 		t.Fatal("configured timeout was not applied")
 	}
@@ -742,7 +802,7 @@ func TestHTTPRefreshStoreFailuresKeepTokenBlocked(t *testing.T) {
 				writeSessionCredentials(t, response, rotated)
 			}))
 			defer server.Close()
-			transport, err := NewHTTP(server.URL)
+			transport, err := NewHTTPTransport(server.URL)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -751,14 +811,15 @@ func TestHTTPRefreshStoreFailuresKeepTokenBlocked(t *testing.T) {
 				t.Fatal(err)
 			}
 			err = signed.Invoke(t.Context(), "catalog.create", map[string]string{}, &struct{}{})
-			want := "session refresh failed; sign in again"
-			if mode == "save failure" || mode == "recovered save panic" {
-				want = "could not save session"
+			failure, ok := errors.AsType[*ClientError](err)
+			wantCode := CodeFailedPrecondition
+			if strings.Contains(mode, "panic") && !strings.Contains(mode, "recovered") {
+				wantCode = CodeUnauthenticated
 			}
-			if err == nil || err.Error() != want {
-				t.Fatalf("store failure = %v, want %s", err, want)
+			if !ok || failure.Code != wantCode || failure.Status != nil {
+				t.Fatal("store failure lost its local classification")
 			}
-			secondTransport, err := NewHTTP(server.URL)
+			secondTransport, err := NewHTTPTransport(server.URL)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -766,10 +827,10 @@ func TestHTTPRefreshStoreFailuresKeepTokenBlocked(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			for _, client := range []*HTTP{signed, secondSigned} {
+			for _, client := range []*HTTPTransport{signed, secondSigned} {
 				err := client.Invoke(t.Context(), "catalog.create", map[string]string{}, &struct{}{})
-				failure, ok := errors.AsType[*OperationError](err)
-				if !ok || failure.Code != "invalid_token" || failure.Status != 401 {
+				failure, ok := errors.AsType[*ClientError](err)
+				if !ok || failure.Code != CodeUnauthenticated || failure.Status != nil || !failure.OutcomeUnknown {
 					t.Fatalf("blocked token failure = %v", err)
 				}
 			}
@@ -843,7 +904,7 @@ func TestHTTPRefreshSynchronizesDistinctStoreCaches(t *testing.T) {
 	}))
 	defer server.Close()
 	defer unblock()
-	transport, err := NewHTTP(server.URL)
+	transport, err := NewHTTPTransport(server.URL)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -914,7 +975,7 @@ func TestHTTPRefreshOverlapDoesNotClearOrBlockNewLogin(t *testing.T) {
 			}))
 			defer server.Close()
 			defer unblock()
-			transport, err := NewHTTP(server.URL)
+			transport, err := NewHTTPTransport(server.URL)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -981,7 +1042,7 @@ func TestHTTPRefreshCancellationDoesNotCancelSharedWork(t *testing.T) {
 	}))
 	defer server.Close()
 	defer unblock()
-	transport, err := NewHTTP(server.URL)
+	transport, err := NewHTTPTransport(server.URL)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1032,13 +1093,15 @@ func TestRefreshFlightPanicNotifiesWaiters(t *testing.T) {
 	release := make(chan struct{})
 	results := make(chan error, 2)
 	go func() {
-		_, err := flights.Do(t.Context(), refreshKey{token: token}, func() (string, error) { close(started); <-release; panic("fixture secret") })
+		_, err := flights.Do(t.Context(), refreshKey{token: token}, func() (SessionCredentials, error) { close(started); <-release; panic("fixture secret") })
 		results <- err
 	}()
 	<-started
 	ctx := &refreshWaitContext{Context: t.Context(), waiting: make(chan struct{})}
 	go func() {
-		_, err := flights.Do(ctx, refreshKey{token: token}, func() (string, error) { return "", errors.New("unexpected second flight") })
+		_, err := flights.Do(ctx, refreshKey{token: token}, func() (SessionCredentials, error) {
+			return SessionCredentials{}, errors.New("unexpected second flight")
+		})
 		results <- err
 	}()
 	<-ctx.waiting
@@ -1127,7 +1190,7 @@ func TestHTTPRefreshStoreValueBoundaries(t *testing.T) {
 				})
 				results := make(chan error, 2)
 				for _, store := range []SessionStore{first, second} {
-					transport, err := NewHTTP("https://fixture.example")
+					transport, err := NewHTTPTransport("https://fixture.example")
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -1139,7 +1202,7 @@ func TestHTTPRefreshStoreValueBoundaries(t *testing.T) {
 					go func() { results <- signed.Invoke(t.Context(), "catalog.create", map[string]string{}, &struct{}{}) }()
 					synctest.Wait()
 				}
-				if err := <-results; !isInvalidToken(err) {
+				if err := <-results; !isBlockedRefresh(err) {
 					t.Fatalf("independent flight reused a consumed token: %v", err)
 				}
 				if firstStore == secondStore {
@@ -1205,7 +1268,7 @@ func TestHTTPRefreshJoinsWithoutStoreSerialization(t *testing.T) {
 	}))
 	defer server.Close()
 	defer unblock()
-	transport, err := NewHTTP(server.URL)
+	transport, err := NewHTTPTransport(server.URL)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1283,7 +1346,7 @@ func TestHTTPBoundsResponseRetentionAndStopsReading(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			body := &countingResponseBody{Reader: strings.NewReader("{}" + strings.Repeat(" ", test.bodyBytes-2))}
-			transport, err := NewHTTP("https://fixture.example")
+			transport, err := NewHTTPTransport("https://fixture.example")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1292,8 +1355,8 @@ func TestHTTPBoundsResponseRetentionAndStopsReading(t *testing.T) {
 			})
 			err = transport.Invoke(t.Context(), "catalog.create", map[string]string{}, &struct{}{})
 			if test.status == 307 {
-				failure, ok := errors.AsType[*OperationError](err)
-				if !ok || failure.Code != test.wantError || failure.Status != test.status {
+				failure, ok := errors.AsType[*ClientError](err)
+				if !ok || failure.Code != CodeInternal || failure.Status == nil || *failure.Status != test.status {
 					t.Fatalf("redirect error = %v", err)
 				}
 			} else if test.wantError == "" {
@@ -1325,7 +1388,7 @@ func TestHTTPUsesHTTP1AgainstHTTP2CapableTLSOrigin(t *testing.T) {
 	server.EnableHTTP2 = true
 	server.StartTLS()
 	defer server.Close()
-	transport, err := NewHTTP(server.URL)
+	transport, err := NewHTTPTransport(server.URL)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1349,7 +1412,7 @@ func TestHTTPRejectsReplacedDefaultTransportWithoutPanic(t *testing.T) {
 		t.Fatal("constructor sent a request through the replaced default")
 		return nil, errors.New("unexpected request")
 	})
-	transport, err := NewHTTP("https://fixture.example")
+	transport, err := NewHTTPTransport("https://fixture.example")
 	if transport != nil || err == nil || err.Error() != "default transport is not a standard *http.Transport; required to bound response buffering" {
 		t.Fatalf("replaced default constructor result = %v, %v", transport, err)
 	}
@@ -1375,13 +1438,13 @@ func TestHTTPPreservesInvalidAndUnreadableResponseErrors(t *testing.T) {
 		reader io.Reader
 		want   string
 	}{
-		{"invalid JSON", strings.NewReader("not JSON"), "operation failed (invalid_response, HTTP 200)"},
+		{"invalid JSON", strings.NewReader("not JSON"), "invalid operation response"},
 		{"body read failure", &responseFailureReader{remaining: 16}, "could not read operation response"},
 		{"overflow probe read failure", &responseFailureReader{remaining: 1 << 20}, "could not read operation response"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			body := &countingResponseBody{Reader: test.reader}
-			transport, err := NewHTTP("https://fixture.example")
+			transport, err := NewHTTPTransport("https://fixture.example")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1402,7 +1465,7 @@ func TestHTTPInvalidSuccessDoesNotPublishPartialOutput(t *testing.T) {
 		io.WriteString(w, `{"wire_value":"partial","observed_at":42}`)
 	}))
 	defer server.Close()
-	transport, err := NewHTTP(server.URL)
+	transport, err := NewHTTPTransport(server.URL)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1412,8 +1475,108 @@ func TestHTTPInvalidSuccessDoesNotPublishPartialOutput(t *testing.T) {
 	}{WireValue: "previous", ObservedAt: "previous"}
 	previous := output
 	err = transport.Invoke(t.Context(), "probe.echo", map[string]any{}, &output)
-	failure, ok := errors.AsType[*OperationError](err)
-	if !ok || failure.Code != "invalid_response" || failure.Status != http.StatusAccepted || output != previous {
+	failure, ok := errors.AsType[*ClientError](err)
+	if !ok || failure.Code != CodeInternal || failure.Status == nil || *failure.Status != http.StatusAccepted || output != previous {
 		t.Fatalf("invalid success error=%v, partial output published=%t", err, output != previous)
+	}
+}
+
+func TestHTTPClientErrorPreflightDoesNotSend(t *testing.T) {
+	transport, err := NewHTTPTransport("https://api.example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	transport.client.Transport = responseTransport(func(*http.Request) (*http.Response, error) {
+		calls++
+		return nil, errors.New("unexpected network call")
+	})
+	for _, test := range []struct {
+		name      string
+		operation string
+		input     any
+		output    any
+		code      ClientErrorCode
+	}{
+		{"operation", "invalid", struct{}{}, &struct{}{}, CodeInvalidArgument},
+		{"marshal", "test.echo", make(chan int), &struct{}{}, CodeInvalidArgument},
+		{"size", "test.echo", strings.Repeat("a", 4<<20), &struct{}{}, CodeResourceExhausted},
+		{"output", "test.echo", struct{}{}, nil, CodeInvalidArgument},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := transport.Invoke(t.Context(), test.operation, test.input, test.output)
+			failure, ok := errors.AsType[*ClientError](err)
+			if !ok || failure.Code != test.code || failure.Status != nil || failure.OutcomeUnknown || calls != 0 {
+				t.Fatal("preflight failure lost classification or entered the network")
+			}
+			if _, ok := errors.AsType[*OperationError](err); ok {
+				t.Fatal("local failure became a server rejection")
+			}
+		})
+	}
+}
+
+func TestHTTPClientErrorBeforeTransmissionHasKnownOutcome(t *testing.T) {
+	transport, err := NewHTTPTransport("https://api.example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport.client.Transport = responseTransport(func(*http.Request) (*http.Response, error) {
+		return nil, io.EOF
+	})
+	for _, canceled := range []bool{false, true} {
+		ctx, cancel := context.WithCancel(t.Context())
+		if canceled {
+			cancel()
+		}
+		err := transport.Invoke(ctx, "test.echo", struct{}{}, &struct{}{})
+		cancel()
+		failure, ok := errors.AsType[*ClientError](err)
+		if !ok || failure.Status != nil || failure.OutcomeUnknown {
+			t.Fatal("unsent failure acquired a response or unknown outcome")
+		}
+		if !canceled && failure.Code != CodeUnavailable {
+			t.Fatal("network failure lost its code")
+		}
+	}
+}
+
+func isBlockedRefresh(err error) bool {
+	failure, ok := errors.AsType[*ClientError](err)
+	return ok && failure.Code == CodeUnauthenticated && failure.Status == nil && failure.OutcomeUnknown
+}
+
+func TestHTTPMissingSessionDoesNotSend(t *testing.T) {
+	transport, err := NewHTTPTransport("https://api.example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := new(MemoryStore)
+	credentials := newRefreshStore().Credentials()
+	if err := store.Set(credentials); err != nil {
+		t.Fatal(err)
+	}
+	signed, err := transport.WithSession(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Clear(t.Context(), credentials); err != nil {
+		t.Fatal(err)
+	}
+	signed.client.Transport = responseTransport(func(*http.Request) (*http.Response, error) {
+		t.Fatal("missing session reached the network")
+		return nil, io.EOF
+	})
+	err = signed.Invoke(t.Context(), "test.echo", struct{}{}, &struct{}{})
+	failure, ok := errors.AsType[*ClientError](err)
+	if !ok || failure.Code != CodeUnauthenticated || failure.Status != nil || failure.OutcomeUnknown {
+		t.Fatal("missing session lost its local classification")
+	}
+}
+
+func TestHTTPRejectsNilTransportOption(t *testing.T) {
+	transport, err := NewHTTPTransport("https://api.example.com", nil)
+	if transport != nil || !hasClientCode(err, CodeInvalidArgument) {
+		t.Fatal("nil option was accepted")
 	}
 }

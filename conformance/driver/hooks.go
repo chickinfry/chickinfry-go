@@ -7,15 +7,15 @@ import (
 	"slices"
 	"time"
 
-	chik "github.com/chickinfry/chickinfry-go"
+	"github.com/chickinfry/chickinfry-go"
 )
 
 func supportedCapabilities() []string {
 	return append(append([]string{}, capabilities...), "barrier", "session.store", "session.trace", "client.transport")
 }
 func supportsTransport() bool { return true }
-func newHTTP(origin string, timeout time.Duration) (*chik.HTTP, *int64, *Error) {
-	transport, observed, err := chik.ConformanceNewHTTPWithTimeout(origin, timeout)
+func newHTTP(origin string, timeout time.Duration) (*chickinfry.HTTPTransport, *int64, *Error) {
+	transport, observed, err := chickinfry.ConformanceNewHTTPTransport(origin, chickinfry.WithTimeout(timeout))
 	if err != nil {
 		e := normalize(err)
 		e.RawTransportDetails, e.OutcomeUnknown = observed.RawTransportDetails, observed.OutcomeUnknown
@@ -24,8 +24,10 @@ func newHTTP(origin string, timeout time.Duration) (*chik.HTTP, *int64, *Error) 
 	}
 	return transport, new(observed.NetworkRequests), nil
 }
-func supportsSession() bool                  { return true }
-func (store *storeBinding) revision() uint64 { return chik.ConformanceStoreRevision(store.memory) }
+func supportsSession() bool { return true }
+func (store *storeBinding) revision() uint64 {
+	return chickinfry.ConformanceStoreRevision(store.memory)
+}
 func supportsBarrierPoint(point string) bool {
 	return slices.Contains([]string{"sdk-entered", "both-originals-rejected", "refresh-joined"}, point)
 }
@@ -46,8 +48,8 @@ func attachHooks(s *server, ctx, control context.Context, callID, caseID string)
 		}
 	}
 	s.credentials.mu.Unlock()
-	return chik.WithConformanceHooks(ctx, callID, chik.ConformanceHooks{
-		Observe: func(event chik.ConformanceTransportEvent) {
+	return chickinfry.WithConformanceHooks(ctx, callID, chickinfry.ConformanceHooks{
+		Observe: func(event chickinfry.ConformanceTransportEvent) {
 			s.observeMu.Lock()
 			defer s.observeMu.Unlock()
 			observations.complete = observations.complete && event.Measurable
@@ -61,13 +63,13 @@ func attachHooks(s *server, ctx, control context.Context, callID, caseID string)
 			observations.events = append(observations.events, projected)
 			s.throughSequence = event.Sequence
 		},
-		Result: func(event chik.ConformanceResultEvent) {
+		Result: func(event chickinfry.ConformanceResultEvent) {
 			s.observeMu.Lock()
 			defer s.observeMu.Unlock()
 			observations.status, observations.raw, observations.unknown = event.HTTPStatus, event.RawTransportDetails, event.OutcomeUnknown
 		},
 		CredentialRefs: refs,
-		SessionTrace: func(event chik.ConformanceSessionEvent) {
+		SessionTrace: func(event chickinfry.ConformanceSessionEvent) {
 			if event.Phase != "clear" {
 				return
 			}
@@ -83,7 +85,7 @@ func attachHooks(s *server, ctx, control context.Context, callID, caseID string)
 			}
 			store.clearAttempts = append(store.clearAttempts, observedClear{CallID: event.CallID, ExpectedAccessRef: event.ExpectedAccessRef, ExpectedRefreshRef: event.ExpectedRefreshRef, Removed: event.Removed})
 		},
-		Barrier: func(runtime context.Context, event chik.ConformanceBarrierEvent) error {
+		Barrier: func(runtime context.Context, event chickinfry.ConformanceBarrierEvent) error {
 			if !supportsBarrierPoint(event.Point) {
 				return nil
 			}

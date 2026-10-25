@@ -1,5 +1,5 @@
-// Package chik provides the shared Go runtime behind Chickinfry generated clients.
-package chik
+// Package chickinfry provides the shared Go runtime behind Chickinfry generated clients.
+package chickinfry
 
 import (
 	"bytes"
@@ -34,8 +34,8 @@ func (err *OperationError) Error() string {
 	return fmt.Sprintf("operation failed (%s, HTTP %d)", err.Code, err.Status)
 }
 
-// HTTP is a transport that invokes operations against a fixed origin.
-type HTTP struct {
+// HTTPTransport is a transport that invokes operations against a fixed origin.
+type HTTPTransport struct {
 	origin    string
 	client    *http.Client
 	bearer    string
@@ -68,9 +68,9 @@ type SessionStore interface {
 }
 
 type refreshFlight struct {
-	done  chan struct{}
-	token string
-	err   error
+	done        chan struct{}
+	credentials SessionCredentials
+	err         error
 }
 
 type refreshFlights struct {
@@ -100,9 +100,9 @@ var unknownRefreshes sync.Map
 
 var tokenPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{43}$`)
 
-func (flights *refreshFlights) Do(ctx context.Context, key refreshKey, run func() (string, error)) (string, error) {
+func (flights *refreshFlights) Do(ctx context.Context, key refreshKey, run func() (SessionCredentials, error)) (SessionCredentials, error) {
 	if err := ctx.Err(); err != nil {
-		return "", err
+		return SessionCredentials{}, err
 	}
 	flights.mu.Lock()
 	if flights.flights == nil {
@@ -111,13 +111,15 @@ func (flights *refreshFlights) Do(ctx context.Context, key refreshKey, run func(
 	if flight, ok := flights.flights[key]; ok {
 		flights.mu.Unlock()
 		if err := conformanceJoin(ctx, flight, false); err != nil {
-			return "", err
+			return SessionCredentials{}, err
 		}
 		select {
 		case <-flight.done:
-			return flight.token, flight.err
+			return flight.credentials, flight.err
 		case <-ctx.Done():
-			return "", ctx.Err()
+			failure := newTransportError(ctx.Err())
+			failure.OutcomeUnknown = true
+			return SessionCredentials{}, failure
 		}
 	}
 	flight := &refreshFlight{done: make(chan struct{})}
@@ -128,7 +130,7 @@ func (flights *refreshFlights) Do(ctx context.Context, key refreshKey, run func(
 		defer func() {
 			if recover() != nil {
 				unknownRefreshes.Store(sha256.Sum256([]byte(key.token)), struct{}{})
-				flight.err = errors.New("session refresh failed; sign in again")
+				flight.err = &ClientError{Code: CodeUnauthenticated, Message: "session refresh failed; sign in again", OutcomeUnknown: true}
 			}
 			flights.mu.Lock()
 			delete(flights.flights, key)
@@ -140,20 +142,22 @@ func (flights *refreshFlights) Do(ctx context.Context, key refreshKey, run func(
 			flight.err = err
 			return
 		}
-		flight.token, flight.err = run()
+		flight.credentials, flight.err = run()
 	}()
 	select {
 	case <-flight.done:
-		return flight.token, flight.err
+		return flight.credentials, flight.err
 	case <-ctx.Done():
-		return "", ctx.Err()
+		failure := newTransportError(ctx.Err())
+		failure.OutcomeUnknown = true
+		return SessionCredentials{}, failure
 	}
 }
 
 // WithBearer returns a copy that uses the given bearer token without mutating the original transport.
-func (transport *HTTP) WithBearer(token string) (*HTTP, error) {
+func (transport *HTTPTransport) WithBearer(token string) (*HTTPTransport, error) {
 	if !tokenPattern.MatchString(token) {
-		return nil, errors.New("invalid access token")
+		return nil, &ClientError{Code: CodeInvalidArgument, Message: "invalid access token"}
 	}
 	copy := *transport
 	copy.bearer = token
@@ -167,16 +171,16 @@ func (transport *HTTP) WithBearer(token string) (*HTTP, error) {
 // share by value equality. Non-comparable or non-reflexive values (such as values
 // containing NaN) use per-binding flights. The shared flight registry retains stores
 // only until their flights complete. Use a store only with clients for the same origin.
-func (transport *HTTP) WithSession(store SessionStore) (*HTTP, error) {
+func (transport *HTTPTransport) WithSession(store SessionStore) (*HTTPTransport, error) {
 	if store == nil {
-		return nil, errors.New("session store is required")
+		return nil, &ClientError{Code: CodeInvalidArgument, Message: "session store is required"}
 	}
 	if transport.refreshes == nil {
-		return nil, errors.New("session transport is not initialized")
+		return nil, &ClientError{Code: CodeFailedPrecondition, Message: "session transport is not initialized"}
 	}
 	credentials := store.Credentials()
 	if !tokenPattern.MatchString(credentials.AccessToken) || !tokenPattern.MatchString(credentials.RefreshToken) {
-		return nil, errors.New("invalid session credential")
+		return nil, &ClientError{Code: CodeUnauthenticated, Message: "session is unavailable; sign in again"}
 	}
 	signed, err := transport.WithBearer(credentials.AccessToken)
 	if err != nil {
@@ -192,23 +196,37 @@ func (transport *HTTP) WithSession(store SessionStore) (*HTTP, error) {
 	return signed, nil
 }
 
-// NewHTTP accepts only HTTPS or loopback HTTP origins and refuses redirects.
-func NewHTTP(origin string) (*HTTP, error) {
-	return NewHTTPWithTimeout(origin, 30*time.Second)
+// HTTPTransportOption configures an HTTP transport during construction.
+type HTTPTransportOption func(*httpTransportOptions)
+
+type httpTransportOptions struct{ timeout time.Duration }
+
+// WithTimeout sets a positive per-request timeout, validated by NewHTTPTransport.
+func WithTimeout(timeout time.Duration) HTTPTransportOption {
+	return func(options *httpTransportOptions) { options.timeout = timeout }
 }
 
-// NewHTTPWithTimeout builds a transport applying a per-request timeout.
-func NewHTTPWithTimeout(origin string, timeout time.Duration) (*HTTP, error) {
-	return newHTTPWithTimeout(origin, timeout, nil)
+// NewHTTPTransport accepts only HTTPS or loopback HTTP origins and refuses redirects.
+// The per-request timeout defaults to 30 seconds.
+func NewHTTPTransport(origin string, options ...HTTPTransportOption) (*HTTPTransport, error) {
+	return newHTTP(origin, options, nil)
 }
 
-func newHTTPWithTimeout(origin string, timeout time.Duration, observe func(*http.Transport) http.RoundTripper) (*HTTP, error) {
+func newHTTP(origin string, options []HTTPTransportOption, observe func(*http.Transport) http.RoundTripper) (*HTTPTransport, error) {
+	config := httpTransportOptions{timeout: 30 * time.Second}
+	for _, option := range options {
+		if option == nil {
+			return nil, &ClientError{Code: CodeInvalidArgument, Message: "transport option is required"}
+		}
+		option(&config)
+	}
+	timeout := config.timeout
 	if timeout <= 0 {
-		return nil, errors.New("operation timeout must be positive")
+		return nil, &ClientError{Code: CodeInvalidArgument, Message: "operation timeout must be positive"}
 	}
 	parsed, err := url.Parse(origin)
 	if err != nil || parsed.Hostname() == "" {
-		return nil, errors.New("invalid operation endpoint")
+		return nil, &ClientError{Code: CodeInvalidArgument, Message: "invalid operation endpoint"}
 	}
 	host := parsed.Hostname()
 	ip, ipErr := netip.ParseAddr(host)
@@ -217,22 +235,33 @@ func newHTTPWithTimeout(origin string, timeout time.Duration, observe func(*http
 	secure := parsed.Scheme == "https" || (parsed.Scheme == "http" && loopback)
 	invalidPath := parsed.Path != "" && parsed.Path != "/"
 	if !secure || invalidPath || parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || strings.Contains(origin, "#") {
-		return nil, errors.New("operation endpoint must be an HTTPS or loopback HTTP origin")
+		return nil, &ClientError{Code: CodeInvalidArgument, Message: "operation endpoint must be an HTTPS or loopback HTTP origin"}
 	}
 	// Go 1.27 HTTP/2 retains a 4 MiB stream window, exceeding our response budget
 	// (net/http/internal/http2/transport.go:45,50; config.go:57,62).
 	standardTransport, ok := http.DefaultTransport.(*http.Transport)
 	if !ok || standardTransport == nil {
-		return nil, errors.New("default transport is not a standard *http.Transport; required to bound response buffering")
+		return nil, &ClientError{Code: CodeFailedPrecondition, Message: "default transport is not a standard *http.Transport; required to bound response buffering"}
 	}
 	clientTransport := standardTransport.Clone()
 	clientTransport.Protocols = new(http.Protocols)
 	clientTransport.Protocols.SetHTTP1(true)
+	dial := clientTransport.DialContext
+	if dial == nil {
+		dial = (&net.Dialer{}).DialContext
+	}
+	clientTransport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+		connection, err := dial(ctx, network, address)
+		if err != nil {
+			return nil, err
+		}
+		return &requestConn{Conn: connection}, nil
+	}
 	var roundTripper http.RoundTripper = clientTransport
 	if observe != nil {
 		roundTripper = observe(clientTransport)
 	}
-	return &HTTP{
+	return &HTTPTransport{
 		// Serialize through url.URL so IPv6 zone identifiers keep their
 		// canonical percent encoding and the origin still round-trips.
 		origin:    (&url.URL{Scheme: parsed.Scheme, Host: parsed.Host}).String(),
@@ -249,10 +278,13 @@ var operationName = regexp.MustCompile(`^[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*$`)
 var errorCode = regexp.MustCompile(`^[a-z_]+$`)
 
 // Invoke calls a single operation with POST and fills output from the response.
-func (transport *HTTP) Invoke(ctx context.Context, operation string, input any, output any) (result error) {
+func (transport *HTTPTransport) Invoke(ctx context.Context, operation string, input any, output any) (result error) {
 	ctx, finish, hookErr := conformanceBegin(ctx, transport.origin, transport.session != nil)
 	defer finish()
-	defer func() { conformanceResult(ctx, result) }()
+	defer func() {
+		result = sessionError(result, false)
+		conformanceResult(ctx, result)
+	}()
 	if hookErr != nil {
 		return hookErr
 	}
@@ -260,6 +292,9 @@ func (transport *HTTP) Invoke(ctx context.Context, operation string, input any, 
 		return transport.invokeOnce(ctx, operation, input, output, transport.bearer, nil)
 	}
 	credentials := transport.session.Credentials()
+	if !tokenPattern.MatchString(credentials.AccessToken) || !tokenPattern.MatchString(credentials.RefreshToken) {
+		return &ClientError{Code: CodeUnauthenticated, Message: "session is unavailable; sign in again"}
+	}
 	bearer := credentials.AccessToken
 	if operation == "auth.refresh" {
 		bearer = ""
@@ -279,16 +314,22 @@ func (transport *HTTP) Invoke(ctx context.Context, operation string, input any, 
 	return transport.invokeOnce(ctx, operation, input, output, credentials.AccessToken, nil)
 }
 
-func (transport *HTTP) refreshSession(ctx context.Context, failed SessionCredentials) (SessionCredentials, error) {
+func (transport *HTTPTransport) refreshSession(ctx context.Context, failed SessionCredentials) (SessionCredentials, error) {
 	current := transport.session.Credentials()
+	if !tokenPattern.MatchString(current.AccessToken) || !tokenPattern.MatchString(current.RefreshToken) {
+		return SessionCredentials{}, &ClientError{Code: CodeUnauthenticated, Message: "session is unavailable; sign in again"}
+	}
 	if current != failed {
+		if !sameSession(current, failed) {
+			return SessionCredentials{}, &ClientError{Code: CodeUnauthenticated, Message: "session changed; sign in again"}
+		}
 		return current, nil
 	}
 	key := refreshKey{token: current.RefreshToken}
 	if transport.refreshes == &customRefreshes {
 		key.store = transport.session
 	}
-	_, err := transport.refreshes.Do(ctx, key, func() (string, error) {
+	refreshed, err := transport.refreshes.Do(ctx, key, func() (SessionCredentials, error) {
 		var rejected SessionCredentials
 		fingerprint := sha256.Sum256([]byte(current.RefreshToken))
 		attempted := false
@@ -296,6 +337,9 @@ func (transport *HTTP) refreshSession(ctx context.Context, failed SessionCredent
 		refreshed, err := transport.session.Refresh(context.WithoutCancel(ctx), func(refreshCtx context.Context, latest SessionCredentials) (SessionCredentials, error) {
 			rejected = latest
 			if latest != failed {
+				if !sameSession(latest, failed) {
+					return SessionCredentials{}, &ClientError{Code: CodeUnauthenticated, Message: "session changed; sign in again"}
+				}
 				return latest, nil
 			}
 			written := new(atomic.Bool)
@@ -304,7 +348,7 @@ func (transport *HTTP) refreshSession(ctx context.Context, failed SessionCredent
 				if observed, ok := previous.(*atomic.Bool); ok && observed.Load() {
 					conformanceRefreshBlocked(refreshCtx)
 				}
-				return SessionCredentials{}, &OperationError{Code: "invalid_token", Status: http.StatusUnauthorized}
+				return SessionCredentials{}, &ClientError{Code: CodeUnauthenticated, Message: "refresh outcome is unknown; sign in again", OutcomeUnknown: true}
 			}
 			refreshCtx = httptrace.WithClientTrace(refreshCtx, &httptrace.ClientTrace{
 				WroteRequest: func(info httptrace.WroteRequestInfo) {
@@ -320,7 +364,8 @@ func (transport *HTTP) refreshSession(ctx context.Context, failed SessionCredent
 			classified := false
 			err := transport.invokeOnce(refreshCtx, "auth.refresh", map[string]string{"refresh_token": latest.RefreshToken}, &response, "", &classified)
 			if err != nil {
-				if classified {
+				failure, local := errors.AsType[*ClientError](err)
+				if classified || (local && !failure.OutcomeUnknown) {
 					unknownOutcome = false
 				}
 				return SessionCredentials{}, err
@@ -330,24 +375,60 @@ func (transport *HTTP) refreshSession(ctx context.Context, failed SessionCredent
 		if err != nil {
 			if !unknownOutcome && isUnauthorized(err) {
 				if clearErr := conformanceClear(context.WithoutCancel(ctx), transport.session, rejected); clearErr != nil {
-					return "", errors.Join(err, clearErr)
+					return SessionCredentials{}, errors.Join(err, sessionError(clearErr, unknownOutcome))
 				}
 			}
 			if attempted && !unknownOutcome {
 				unknownRefreshes.Delete(fingerprint)
 			}
-			return "", err
+			return SessionCredentials{}, sessionError(err, unknownOutcome)
 		}
 		// The callback succeeding does not prove that rotated credentials were saved.
 		if attempted {
 			unknownRefreshes.Delete(fingerprint)
 		}
-		return refreshed.AccessToken, nil
+		return refreshed, nil
 	})
 	if err != nil {
 		return SessionCredentials{}, err
 	}
-	return transport.session.Credentials(), nil
+	latest := transport.session.Credentials()
+	if (latest.AccessToken != refreshed.AccessToken || latest.RefreshToken != refreshed.RefreshToken) && !sameSession(latest, refreshed) {
+		return SessionCredentials{}, &ClientError{Code: CodeUnauthenticated, Message: "session changed; sign in again"}
+	}
+	if !tokenPattern.MatchString(latest.AccessToken) || !tokenPattern.MatchString(latest.RefreshToken) {
+		return SessionCredentials{}, &ClientError{Code: CodeUnauthenticated, Message: "session is unavailable; sign in again", OutcomeUnknown: true}
+	}
+	return latest, nil
+}
+
+func sameSession(first, second SessionCredentials) bool {
+	// Two tokens alone cannot establish that a concurrent replacement is a rotation.
+	return first.UserID != "" && first.SessionID != "" && first.UserID == second.UserID && first.SessionID == second.SessionID
+}
+
+type requestWrite struct {
+	written atomic.Bool
+	pending atomic.Int64
+}
+
+type requestConn struct {
+	net.Conn
+	write atomic.Pointer[requestWrite]
+}
+
+func (connection *requestConn) Write(buffer []byte) (int, error) {
+	state := connection.write.Load()
+	if state == nil {
+		return connection.Conn.Write(buffer)
+	}
+	state.pending.Add(1)
+	n, err := connection.Conn.Write(buffer)
+	if n > 0 {
+		state.written.Store(true)
+	}
+	state.pending.Add(-1)
+	return n, err
 }
 
 func isInvalidToken(err error) bool {
@@ -374,8 +455,19 @@ func (err *transportError) Error() string {
 
 func (err *transportError) Unwrap() error { return err.cause }
 
-func newTransportError(cause error) error {
-	return &transportError{cause: cause, class: classifyTransportFailure(cause)}
+func newTransportError(cause error) *ClientError {
+	class := classifyTransportFailure(cause)
+	code := CodeUnavailable
+	switch class {
+	case "context canceled":
+		code = CodeCanceled
+	case "deadline exceeded", "timeout":
+		code = CodeDeadlineExceeded
+	case "malformed HTTP response":
+		code = CodeInternal
+	}
+	redacted := &transportError{cause: cause, class: class}
+	return &ClientError{Code: code, Message: redacted.Error(), cause: redacted}
 }
 
 func classifyTransportFailure(err error) string {
@@ -427,17 +519,44 @@ func isMalformedResponse(err error) bool {
 		strings.HasPrefix(message, "malformed MIME header")
 }
 
-func (transport *HTTP) invokeOnce(ctx context.Context, operation string, input any, output any, bearer string, classified *bool) (result error) {
+func (transport *HTTPTransport) invokeOnce(ctx context.Context, operation string, input any, output any, bearer string, classified *bool) (result error) {
 	if !operationName.MatchString(operation) {
-		return errors.New("invalid operation name")
+		return &ClientError{Code: CodeInvalidArgument, Message: "invalid operation name"}
+	}
+	value := reflect.ValueOf(output)
+	if value.Kind() != reflect.Pointer || value.IsNil() {
+		return &ClientError{Code: CodeInvalidArgument, Message: "operation output must be a non-nil pointer"}
 	}
 	body, err := json.Marshal(input)
 	if err != nil {
-		return errors.New("invalid operation request")
+		return &ClientError{Code: CodeInvalidArgument, Message: "invalid operation request"}
 	}
 	if len(body) > 4<<20 {
-		return errors.New("operation request is too large")
+		return &ClientError{Code: CodeResourceExhausted, Message: "operation request is too large"}
 	}
+	if err := ctx.Err(); err != nil {
+		return newTransportError(err)
+	}
+	written := new(requestWrite)
+	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
+		GotConn: func(info httptrace.GotConnInfo) {
+			// Start counting after TLS and proxy handshakes, including on reused connections.
+			connection := info.Conn
+			for {
+				if tracked, ok := connection.(*requestConn); ok {
+					tracked.write.Store(written)
+					return
+				}
+				wrapped, ok := connection.(interface{ NetConn() net.Conn })
+				if !ok {
+					// A custom TLS dialer may hide its writes; their outcome remains unknown.
+					written.written.Store(true)
+					return
+				}
+				connection = wrapped.NetConn()
+			}
+		},
+	})
 	requestCtx, client, finishRequest := conformanceRequest(ctx, transport.client, operation, len(body))
 	defer func() { finishRequest(result) }()
 	request, err := http.NewRequestWithContext(requestCtx, http.MethodPost, transport.origin+"/"+operation, bytes.NewReader(body))
@@ -450,14 +569,19 @@ func (transport *HTTP) invokeOnce(ctx context.Context, operation string, input a
 	}
 	response, err := conformanceDo(client, request)
 	if err != nil {
-		return newTransportError(err)
+		failure := newTransportError(err)
+		failure.OutcomeUnknown = written.written.Load() || written.pending.Load() > 0
+		if response != nil {
+			failure.Status = new(response.StatusCode)
+		}
+		return failure
 	}
 	conformanceProbe(requestCtx, response, nil)
 	conformanceHeaders(requestCtx, response)
 	defer func() { response.Body.Close(); conformanceReaderClosed(requestCtx) }()
 	if response.StatusCode >= 300 && response.StatusCode < 400 {
 		conformanceStop(requestCtx, false)
-		return &OperationError{Code: "redirect_not_allowed", Status: response.StatusCode}
+		return &ClientError{Code: CodeInternal, Message: "redirect not allowed", Status: new(response.StatusCode), OutcomeUnknown: true}
 	}
 	data := make([]byte, 1<<20)
 	size := 0
@@ -467,14 +591,18 @@ func (transport *HTTP) invokeOnce(ctx context.Context, operation string, input a
 			n, err := io.ReadFull(response.Body, overflow[:])
 			conformanceProbe(requestCtx, response, data)
 			if conformanceRead(requestCtx, n, size) {
-				return errors.New("operation response is too large")
+				return &ClientError{Code: CodeResourceExhausted, Message: "operation response is too large", Status: new(response.StatusCode), OutcomeUnknown: true}
 			}
 			if n != 0 {
 				conformanceStop(requestCtx, true)
-				return errors.New("operation response is too large")
+				return &ClientError{Code: CodeResourceExhausted, Message: "operation response is too large", Status: new(response.StatusCode), OutcomeUnknown: true}
 			}
 			if err != io.EOF {
-				return errors.New("could not read operation response")
+				failure := newTransportError(err)
+				failure.Message = "could not read operation response"
+				failure.Status = new(response.StatusCode)
+				failure.OutcomeUnknown = true
+				return failure
 			}
 			break
 		}
@@ -482,11 +610,15 @@ func (transport *HTTP) invokeOnce(ctx context.Context, operation string, input a
 		size += n
 		conformanceProbe(requestCtx, response, data)
 		if conformanceRead(requestCtx, n, size) {
-			return errors.New("operation response is too large")
+			return &ClientError{Code: CodeResourceExhausted, Message: "operation response is too large", Status: new(response.StatusCode), OutcomeUnknown: true}
 		}
 		if err != nil {
 			if err != io.EOF {
-				return errors.New("could not read operation response")
+				failure := newTransportError(err)
+				failure.Message = "could not read operation response"
+				failure.Status = new(response.StatusCode)
+				failure.OutcomeUnknown = true
+				return failure
 			}
 			break
 		}
@@ -496,29 +628,24 @@ func (transport *HTTP) invokeOnce(ctx context.Context, operation string, input a
 		failure := struct {
 			Error string `json:"error"`
 		}{}
-		code := "invalid_response"
 		conformanceDecode(requestCtx)
 		if json.Unmarshal(data, &failure) == nil && errorCode.MatchString(failure.Error) {
-			code = failure.Error
 			// Other statuses do not guarantee that a refresh token was left unconsumed.
 			if classified != nil && response.StatusCode == http.StatusUnauthorized {
 				*classified = true
 			}
 			conformanceRejection(requestCtx, response.StatusCode == http.StatusUnauthorized)
+			return &OperationError{Code: failure.Error, Status: response.StatusCode}
 		}
-		return &OperationError{Code: code, Status: response.StatusCode}
+		return &ClientError{Code: CodeInternal, Message: "invalid operation response", Status: new(response.StatusCode), OutcomeUnknown: true}
 	}
 	conformanceDecode(requestCtx)
-	value := reflect.ValueOf(output)
-	if value.Kind() != reflect.Pointer || value.IsNil() {
-		return &OperationError{Code: "invalid_response", Status: response.StatusCode}
-	}
 	decoded := reflect.New(value.Elem().Type())
 	if err := json.Unmarshal(data, decoded.Interface()); err != nil {
-		return &OperationError{Code: "invalid_response", Status: response.StatusCode}
+		return &ClientError{Code: CodeInternal, Message: "invalid operation response", Status: new(response.StatusCode), OutcomeUnknown: true}
 	}
 	if refreshed, ok := decoded.Interface().(*refreshResponse); ok && !validCredentials(SessionCredentials(*refreshed)) {
-		return &OperationError{Code: "invalid_response", Status: response.StatusCode}
+		return &ClientError{Code: CodeInternal, Message: "invalid operation response", Status: new(response.StatusCode), OutcomeUnknown: true}
 	}
 	value.Elem().Set(decoded.Elem())
 	return nil

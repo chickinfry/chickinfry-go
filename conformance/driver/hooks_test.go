@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	chik "github.com/chickinfry/chickinfry-go"
+	"github.com/chickinfry/chickinfry-go"
 )
 
 func TestActualSDKBarriersReleaseOnlyTheirCall(t *testing.T) {
@@ -51,17 +51,17 @@ func TestActualSDKBarriersReleaseOnlyTheirCall(t *testing.T) {
 			t.Cleanup(func() { control.Close(); input.Close(); output.Close(); writer.Close() })
 			done := make(chan error, 1)
 			go func() {
-				transport, err := chik.NewHTTP(peer.URL)
+				transport, err := chickinfry.NewHTTPTransport(peer.URL)
 				if err != nil {
 					done <- err
 					return
 				}
-				transport, err = transport.WithSession(&testOnlyStore{current: chik.SessionCredentials{AccessToken: strings.Repeat("A", 43), RefreshToken: strings.Repeat("B", 43)}})
+				transport, err = transport.WithSession(&testOnlyStore{current: chickinfry.SessionCredentials{AccessToken: strings.Repeat("A", 43), RefreshToken: strings.Repeat("B", 43)}})
 				if err != nil {
 					done <- err
 					return
 				}
-				done <- Run(ctx, input, writer, strings.NewReader(protectedTokens()), func(ctx context.Context, _ *chik.HTTP, op string, raw json.RawMessage) (any, error) {
+				done <- Run(ctx, input, writer, strings.NewReader(protectedTokens()), func(ctx context.Context, _ *chickinfry.HTTPTransport, op string, raw json.RawMessage) (any, error) {
 					return runtimeCall(ctx, transport, op, raw)
 				})
 				writer.Close()
@@ -173,10 +173,10 @@ func TestClearTraceIsFromRuntimeHook(t *testing.T) {
 
 func testClearTrace(t *testing.T, replace bool) {
 	t.Helper()
-	initial := chik.SessionCredentials{AccessToken: strings.Repeat("A", 43), RefreshToken: strings.Repeat("B", 43), ExpiresAt: "2099-01-01T00:00:00Z", RefreshExpiresAt: "2099-02-01T00:00:00Z", UserID: "user", SessionID: "session"}
+	initial := chickinfry.SessionCredentials{AccessToken: strings.Repeat("A", 43), RefreshToken: strings.Repeat("B", 43), ExpiresAt: "2099-01-01T00:00:00Z", RefreshExpiresAt: "2099-02-01T00:00:00Z", UserID: "user", SessionID: "session"}
 	newer := initial
 	newer.AccessToken, newer.RefreshToken = strings.Repeat("C", 43), strings.Repeat("D", 43)
-	store := &storeBinding{memory: new(chik.MemoryStore), clearAttempts: []observedClear{}}
+	store := &storeBinding{memory: new(chickinfry.MemoryStore), clearAttempts: []observedClear{}}
 	if err := store.memory.Set(initial); err != nil {
 		t.Fatal(err)
 	}
@@ -197,7 +197,7 @@ func testClearTrace(t *testing.T, replace bool) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	s := &server{ctx: ctx, cancel: cancel, credentials: refs, barriers: map[string]*barrier{}, pending: map[string]*barrierPending{}}
-	transport, err := chik.NewHTTP(peer.URL)
+	transport, err := chickinfry.NewHTTPTransport(peer.URL)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -211,7 +211,7 @@ func testClearTrace(t *testing.T, replace bool) {
 	if len(trace) != 1 || trace[0].ExpectedAccessRef != "access" || trace[0].ExpectedRefreshRef != "refresh" || trace[0].Removed == nil || *trace[0].Removed != !replace {
 		t.Fatal("actual runtime clear trace was not recorded")
 	}
-	expected := chik.SessionCredentials{}
+	expected := chickinfry.SessionCredentials{}
 	if replace {
 		expected = newer
 	}

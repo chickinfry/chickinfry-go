@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	chik "github.com/chickinfry/chickinfry-go"
+	"github.com/chickinfry/chickinfry-go"
 )
 
 type args struct {
@@ -102,7 +102,7 @@ func (s *server) dispatch(req request) *Error {
 		if s.clients[a.ClientRef] != nil {
 			return failure("driver", "invalid_reference")
 		}
-		var transport *chik.HTTP
+		var transport *chickinfry.HTTPTransport
 		var store *storeBinding
 		var err error
 		var constructorNetworkRequests *int64

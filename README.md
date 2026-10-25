@@ -27,11 +27,11 @@ import (
 	"errors"
 	"fmt"
 
-	chik "github.com/chickinfry/chickinfry-go"
+	"github.com/chickinfry/chickinfry-go"
 )
 
 func main() {
-	transport, err := chik.NewHTTP("https://api.example.com")
+	transport, err := chickinfry.NewHTTPTransport("https://api.example.com")
 	if err != nil {
 		fmt.Println(err)
 		return
@@ -42,9 +42,14 @@ func main() {
 	}
 	err = transport.Invoke(context.Background(), "service.operation", map[string]string{}, &output)
 	if err != nil {
-		var operationErr *chik.OperationError
+		var operationErr *chickinfry.OperationError
 		if errors.As(err, &operationErr) {
 			fmt.Println("operation failed:", operationErr.Code, operationErr.Status)
+			return
+		}
+		var clientErr *chickinfry.ClientError
+		if errors.As(err, &clientErr) {
+			fmt.Println("client failed:", clientErr.Code, clientErr.OutcomeUnknown)
 			return
 		}
 		fmt.Println(err)
@@ -54,15 +59,15 @@ func main() {
 }
 ```
 
-`NewHTTP` accepts HTTPS origins or an explicit IP loopback HTTP origin such as
+`NewHTTPTransport` returns an `HTTPTransport` and accepts HTTPS origins or an explicit IP loopback HTTP origin such as
 `http://127.0.0.1:8787`; other origins are rejected. `WithBearer` returns a copy
 of the transport that sends a bearer token, and `WithSession` attaches a
-`SessionStore` for automatic one-time refresh.
+`SessionStore` for automatic one-time refresh. Use `NewHTTPTransport(origin, WithTimeout(d))` to override the default 30-second request timeout; nonpositive durations are rejected.
 
 Use a shared `MemoryStore` to keep a session in memory:
 
 ```go
-store := new(chik.MemoryStore)
+store := new(chickinfry.MemoryStore)
 if err := store.Set(credentials); err != nil {
 	return err
 }
@@ -77,6 +82,38 @@ The store does not persist credentials or coordinate across processes. Scope
 each store to one origin. Custom
 `SessionStore` implementations retain responsibility for serializing refreshes,
 saving successful results, and clearing only matching credentials.
+
+## Local failures
+
+Local validation, transport, decoding, and session storage failures return
+`*ClientError`. Use `errors.As` to distinguish them from `*OperationError`,
+which represents a validated server rejection. `ClientError.Code` uses these
+stable lowercase values:
+
+| Code | Meaning |
+| --- | --- |
+| `unauthenticated` | A missing session or blocked refresh requires sign-in. |
+| `invalid_argument` | Invalid input or configuration before sending. |
+| `failed_precondition` | Storage or transport state requires caller action. |
+| `resource_exhausted` | Request, response, or storage capacity exceeded. |
+| `deadline_exceeded` | The call exceeded its deadline. |
+| `canceled` | The caller canceled the call. |
+| `unavailable` | A connection or transport failure. |
+| `data_loss` | Stored data is corrupt. |
+| `unimplemented` | The requested environment or storage version is unsupported. |
+| `internal` | An invalid response, refused redirect, or broken invariant. |
+| `unknown` | A local failure without a more specific classification. |
+
+`Status` is a pointer to the actual HTTP status when a response was received,
+or nil otherwise. A timeout does not manufacture HTTP 504, and cancellation
+does not manufacture HTTP 499. `OutcomeUnknown` warns that the operation may
+have executed: do not automatically replay it. A failed or uncertain refresh
+keeps its token blocked rather than trying it again. `errors.Is` and
+`errors.As` can inspect a wrapped cause; that cause may contain raw network
+details, so display the safe `ClientError.Error()` message instead.
+
+The code catalog does not imply support for persistent device storage.
+Generated clients expose their typed operations through `CreateClient(transport)`.
 
 ## Server initialization
 
