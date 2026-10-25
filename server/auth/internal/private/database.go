@@ -8,29 +8,301 @@ import (
 )
 
 type Database struct {
-	connection           *database.Connection
-	AppAuthIdentities    AppAuthIdentitiesRepository
-	AppAuthInvites       AppAuthInvitesRepository
-	AppAuthRateLimits    AppAuthRateLimitsRepository
-	AppAuthRefreshTokens AppAuthRefreshTokensRepository
-	AppAuthSessions      AppAuthSessionsRepository
-	AppAuthUsers         AppAuthUsersRepository
+	connection            *database.Connection
+	AppAuthActionTokens   AppAuthActionTokensRepository
+	AppAuthIdentities     AppAuthIdentitiesRepository
+	AppAuthInvites        AppAuthInvitesRepository
+	AppAuthMigrations     AppAuthMigrationsRepository
+	AppAuthRateLimits     AppAuthRateLimitsRepository
+	AppAuthRefreshTokens  AppAuthRefreshTokensRepository
+	AppAuthSessions       AppAuthSessionsRepository
+	AppAuthSignupRequests AppAuthSignupRequestsRepository
+	AppAuthUsers          AppAuthUsersRepository
 }
 
 func New(connection *database.Connection) *Database {
 	return &Database{connection: connection,
-		AppAuthIdentities:    AppAuthIdentitiesRepository{orm.Repository{Connection: connection, Table: appAuthIdentitiesTable}},
-		AppAuthInvites:       AppAuthInvitesRepository{orm.Repository{Connection: connection, Table: appAuthInvitesTable}},
-		AppAuthRateLimits:    AppAuthRateLimitsRepository{orm.Repository{Connection: connection, Table: appAuthRateLimitsTable}},
-		AppAuthRefreshTokens: AppAuthRefreshTokensRepository{orm.Repository{Connection: connection, Table: appAuthRefreshTokensTable}},
-		AppAuthSessions:      AppAuthSessionsRepository{orm.Repository{Connection: connection, Table: appAuthSessionsTable}},
-		AppAuthUsers:         AppAuthUsersRepository{orm.Repository{Connection: connection, Table: appAuthUsersTable}},
+		AppAuthActionTokens:   AppAuthActionTokensRepository{orm.Repository{Connection: connection, Table: appAuthActionTokensTable}},
+		AppAuthIdentities:     AppAuthIdentitiesRepository{orm.Repository{Connection: connection, Table: appAuthIdentitiesTable}},
+		AppAuthInvites:        AppAuthInvitesRepository{orm.Repository{Connection: connection, Table: appAuthInvitesTable}},
+		AppAuthMigrations:     AppAuthMigrationsRepository{orm.Repository{Connection: connection, Table: appAuthMigrationsTable}},
+		AppAuthRateLimits:     AppAuthRateLimitsRepository{orm.Repository{Connection: connection, Table: appAuthRateLimitsTable}},
+		AppAuthRefreshTokens:  AppAuthRefreshTokensRepository{orm.Repository{Connection: connection, Table: appAuthRefreshTokensTable}},
+		AppAuthSessions:       AppAuthSessionsRepository{orm.Repository{Connection: connection, Table: appAuthSessionsTable}},
+		AppAuthSignupRequests: AppAuthSignupRequestsRepository{orm.Repository{Connection: connection, Table: appAuthSignupRequestsTable}},
+		AppAuthUsers:          AppAuthUsersRepository{orm.Repository{Connection: connection, Table: appAuthUsersTable}},
 	}
 }
 
 // Transaction binds every repository to the same request-owned database lease.
 func (db *Database) Transaction(run func(*Database) error) error {
 	return db.connection.Transaction(func(connection *database.Connection) error { return run(New(connection)) })
+}
+
+var appAuthActionTokensTable = orm.Table{Name: "app_auth_action_tokens", Primary: []string{"id"}, Columns: []orm.Column{
+	{Name: "attempts", Kind: "integer", Nullable: false, Optional: true, Primary: false},
+	{Name: "consumed_at", Kind: "timestamp", Nullable: true, Optional: true, Primary: false},
+	{Name: "created_at", Kind: "timestamp", Nullable: false, Optional: true, Primary: false},
+	{Name: "expires_at", Kind: "timestamp", Nullable: false, Optional: false, Primary: false},
+	{Name: "id", Kind: "id", Nullable: false, Optional: true, Primary: true},
+	{Name: "kind", Kind: "string", Nullable: false, Optional: false, Primary: false},
+	{Name: "token_hash", Kind: "string", Nullable: false, Optional: false, Primary: false},
+	{Name: "user_id", Kind: "id", Nullable: false, Optional: false, Primary: false},
+}}
+
+type AppAuthActionTokensRow struct {
+	Attempts   int32   `json:"attempts"`
+	ConsumedAt *string `json:"consumed_at"`
+	CreatedAt  string  `json:"created_at"`
+	ExpiresAt  string  `json:"expires_at"`
+	ID         string  `json:"id"`
+	Kind       string  `json:"kind"`
+	TokenHash  string  `json:"token_hash"`
+	UserID     string  `json:"user_id"`
+}
+
+type AppAuthActionTokensInsert struct {
+	Attempts   orm.Optional[int32]
+	ConsumedAt orm.Optional[string]
+	CreatedAt  orm.Optional[string]
+	ExpiresAt  string
+	ID         orm.Optional[string]
+	Kind       string
+	TokenHash  string
+	UserID     string
+}
+
+type AppAuthActionTokensUpdate struct {
+	Attempts   orm.Optional[int32]
+	ConsumedAt orm.Optional[string]
+	CreatedAt  orm.Optional[string]
+	ExpiresAt  orm.Optional[string]
+	Kind       orm.Optional[string]
+	TokenHash  orm.Optional[string]
+	UserID     orm.Optional[string]
+}
+
+type AppAuthActionTokensPrimaryKey struct {
+	ID string
+}
+
+type AppAuthActionTokensColumns struct {
+	Attempts   orm.Field[int32]
+	ConsumedAt orm.Field[string]
+	CreatedAt  orm.Field[string]
+	ExpiresAt  orm.Field[string]
+	ID         orm.Field[string]
+	Kind       orm.Field[string]
+	TokenHash  orm.Field[string]
+	UserID     orm.Field[string]
+}
+
+type AppAuthActionTokensRepository struct{ repository orm.Repository }
+
+func (repository AppAuthActionTokensRepository) Columns() AppAuthActionTokensColumns {
+	return AppAuthActionTokensColumns{
+		Attempts:   orm.Field[int32]{Name: "attempts"},
+		ConsumedAt: orm.Field[string]{Name: "consumed_at"},
+		CreatedAt:  orm.Field[string]{Name: "created_at"},
+		ExpiresAt:  orm.Field[string]{Name: "expires_at"},
+		ID:         orm.Field[string]{Name: "id"},
+		Kind:       orm.Field[string]{Name: "kind"},
+		TokenHash:  orm.Field[string]{Name: "token_hash"},
+		UserID:     orm.Field[string]{Name: "user_id"},
+	}
+}
+
+func (repository AppAuthActionTokensRepository) Insert(input AppAuthActionTokensInsert) (AppAuthActionTokensRow, error) {
+	values := map[string]any{}
+	if input.Attempts.Set {
+		if input.Attempts.Null {
+			values["attempts"] = nil
+		} else {
+			values["attempts"] = input.Attempts.Value
+		}
+	}
+	if input.ConsumedAt.Set {
+		if input.ConsumedAt.Null {
+			values["consumed_at"] = nil
+		} else {
+			values["consumed_at"] = input.ConsumedAt.Value
+		}
+	}
+	if input.CreatedAt.Set {
+		if input.CreatedAt.Null {
+			values["created_at"] = nil
+		} else {
+			values["created_at"] = input.CreatedAt.Value
+		}
+	}
+	values["expires_at"] = input.ExpiresAt
+	if input.ID.Set {
+		if input.ID.Null {
+			values["id"] = nil
+		} else {
+			values["id"] = input.ID.Value
+		}
+	}
+	values["kind"] = input.Kind
+	values["token_hash"] = input.TokenHash
+	values["user_id"] = input.UserID
+	row, err := repository.repository.Insert(values)
+	if err != nil {
+		return AppAuthActionTokensRow{}, err
+	}
+	return orm.DecodeRow[AppAuthActionTokensRow](row, appAuthActionTokensTable)
+}
+
+func (repository AppAuthActionTokensRepository) FindByID(key AppAuthActionTokensPrimaryKey) (*AppAuthActionTokensRow, error) {
+	row, err := repository.repository.FindByID(map[string]any{"id": key.ID})
+	if err != nil || row == nil {
+		return nil, err
+	}
+	value, err := orm.DecodeRow[AppAuthActionTokensRow](row, appAuthActionTokensTable)
+	if err != nil {
+		return nil, err
+	}
+	return &value, nil
+}
+
+func (repository AppAuthActionTokensRepository) FindMany(options orm.FindMany) ([]AppAuthActionTokensRow, error) {
+	rows, err := repository.repository.Find(options)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]AppAuthActionTokensRow, 0, len(rows))
+	for _, row := range rows {
+		value, err := orm.DecodeRow[AppAuthActionTokensRow](row, appAuthActionTokensTable)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, value)
+	}
+	return result, nil
+}
+
+func (repository AppAuthActionTokensRepository) Update(key AppAuthActionTokensPrimaryKey, patch AppAuthActionTokensUpdate) (AppAuthActionTokensRow, error) {
+	values := map[string]any{}
+	if patch.Attempts.Set {
+		if patch.Attempts.Null {
+			values["attempts"] = nil
+		} else {
+			values["attempts"] = patch.Attempts.Value
+		}
+	}
+	if patch.ConsumedAt.Set {
+		if patch.ConsumedAt.Null {
+			values["consumed_at"] = nil
+		} else {
+			values["consumed_at"] = patch.ConsumedAt.Value
+		}
+	}
+	if patch.CreatedAt.Set {
+		if patch.CreatedAt.Null {
+			values["created_at"] = nil
+		} else {
+			values["created_at"] = patch.CreatedAt.Value
+		}
+	}
+	if patch.ExpiresAt.Set {
+		if patch.ExpiresAt.Null {
+			values["expires_at"] = nil
+		} else {
+			values["expires_at"] = patch.ExpiresAt.Value
+		}
+	}
+	if patch.Kind.Set {
+		if patch.Kind.Null {
+			values["kind"] = nil
+		} else {
+			values["kind"] = patch.Kind.Value
+		}
+	}
+	if patch.TokenHash.Set {
+		if patch.TokenHash.Null {
+			values["token_hash"] = nil
+		} else {
+			values["token_hash"] = patch.TokenHash.Value
+		}
+	}
+	if patch.UserID.Set {
+		if patch.UserID.Null {
+			values["user_id"] = nil
+		} else {
+			values["user_id"] = patch.UserID.Value
+		}
+	}
+	row, err := repository.repository.Update(map[string]any{"id": key.ID}, values)
+	if err != nil {
+		return AppAuthActionTokensRow{}, err
+	}
+	return orm.DecodeRow[AppAuthActionTokensRow](row, appAuthActionTokensTable)
+}
+
+func (repository AppAuthActionTokensRepository) UpdateIf(key AppAuthActionTokensPrimaryKey, condition orm.Filter, patch AppAuthActionTokensUpdate) (*AppAuthActionTokensRow, error) {
+	values := map[string]any{}
+	if patch.Attempts.Set {
+		if patch.Attempts.Null {
+			values["attempts"] = nil
+		} else {
+			values["attempts"] = patch.Attempts.Value
+		}
+	}
+	if patch.ConsumedAt.Set {
+		if patch.ConsumedAt.Null {
+			values["consumed_at"] = nil
+		} else {
+			values["consumed_at"] = patch.ConsumedAt.Value
+		}
+	}
+	if patch.CreatedAt.Set {
+		if patch.CreatedAt.Null {
+			values["created_at"] = nil
+		} else {
+			values["created_at"] = patch.CreatedAt.Value
+		}
+	}
+	if patch.ExpiresAt.Set {
+		if patch.ExpiresAt.Null {
+			values["expires_at"] = nil
+		} else {
+			values["expires_at"] = patch.ExpiresAt.Value
+		}
+	}
+	if patch.Kind.Set {
+		if patch.Kind.Null {
+			values["kind"] = nil
+		} else {
+			values["kind"] = patch.Kind.Value
+		}
+	}
+	if patch.TokenHash.Set {
+		if patch.TokenHash.Null {
+			values["token_hash"] = nil
+		} else {
+			values["token_hash"] = patch.TokenHash.Value
+		}
+	}
+	if patch.UserID.Set {
+		if patch.UserID.Null {
+			values["user_id"] = nil
+		} else {
+			values["user_id"] = patch.UserID.Value
+		}
+	}
+	row, err := repository.repository.UpdateIf(map[string]any{"id": key.ID}, condition, values)
+	if err != nil || row == nil {
+		return nil, err
+	}
+	value, err := orm.DecodeRow[AppAuthActionTokensRow](row, appAuthActionTokensTable)
+	if err != nil {
+		return nil, err
+	}
+	return &value, nil
+}
+
+func (repository AppAuthActionTokensRepository) Delete(key AppAuthActionTokensPrimaryKey) (bool, error) {
+	return repository.repository.Delete(map[string]any{"id": key.ID})
 }
 
 var appAuthIdentitiesTable = orm.Table{Name: "app_auth_identities", Primary: []string{"provider", "subject"}, Columns: []orm.Column{
@@ -474,6 +746,198 @@ func (repository AppAuthInvitesRepository) UpdateIf(key AppAuthInvitesPrimaryKey
 
 func (repository AppAuthInvitesRepository) Delete(key AppAuthInvitesPrimaryKey) (bool, error) {
 	return repository.repository.Delete(map[string]any{"id": key.ID})
+}
+
+var appAuthMigrationsTable = orm.Table{Name: "app_auth_migrations", Primary: []string{"feature", "version"}, Columns: []orm.Column{
+	{Name: "applied_at", Kind: "timestamp", Nullable: false, Optional: true, Primary: false},
+	{Name: "digest", Kind: "string", Nullable: false, Optional: false, Primary: false},
+	{Name: "feature", Kind: "string", Nullable: false, Optional: false, Primary: true},
+	{Name: "name", Kind: "string", Nullable: false, Optional: false, Primary: false},
+	{Name: "phase", Kind: "string", Nullable: false, Optional: false, Primary: false},
+	{Name: "version", Kind: "integer", Nullable: false, Optional: false, Primary: true},
+}}
+
+type AppAuthMigrationsRow struct {
+	AppliedAt string `json:"applied_at"`
+	Digest    string `json:"digest"`
+	Feature   string `json:"feature"`
+	Name      string `json:"name"`
+	Phase     string `json:"phase"`
+	Version   int32  `json:"version"`
+}
+
+type AppAuthMigrationsInsert struct {
+	AppliedAt orm.Optional[string]
+	Digest    string
+	Feature   string
+	Name      string
+	Phase     string
+	Version   int32
+}
+
+type AppAuthMigrationsUpdate struct {
+	AppliedAt orm.Optional[string]
+	Digest    orm.Optional[string]
+	Name      orm.Optional[string]
+	Phase     orm.Optional[string]
+}
+
+type AppAuthMigrationsPrimaryKey struct {
+	Feature string
+	Version int32
+}
+
+type AppAuthMigrationsColumns struct {
+	AppliedAt orm.Field[string]
+	Digest    orm.Field[string]
+	Feature   orm.Field[string]
+	Name      orm.Field[string]
+	Phase     orm.Field[string]
+	Version   orm.Field[int32]
+}
+
+type AppAuthMigrationsRepository struct{ repository orm.Repository }
+
+func (repository AppAuthMigrationsRepository) Columns() AppAuthMigrationsColumns {
+	return AppAuthMigrationsColumns{
+		AppliedAt: orm.Field[string]{Name: "applied_at"},
+		Digest:    orm.Field[string]{Name: "digest"},
+		Feature:   orm.Field[string]{Name: "feature"},
+		Name:      orm.Field[string]{Name: "name"},
+		Phase:     orm.Field[string]{Name: "phase"},
+		Version:   orm.Field[int32]{Name: "version"},
+	}
+}
+
+func (repository AppAuthMigrationsRepository) Insert(input AppAuthMigrationsInsert) (AppAuthMigrationsRow, error) {
+	values := map[string]any{}
+	if input.AppliedAt.Set {
+		if input.AppliedAt.Null {
+			values["applied_at"] = nil
+		} else {
+			values["applied_at"] = input.AppliedAt.Value
+		}
+	}
+	values["digest"] = input.Digest
+	values["feature"] = input.Feature
+	values["name"] = input.Name
+	values["phase"] = input.Phase
+	values["version"] = input.Version
+	row, err := repository.repository.Insert(values)
+	if err != nil {
+		return AppAuthMigrationsRow{}, err
+	}
+	return orm.DecodeRow[AppAuthMigrationsRow](row, appAuthMigrationsTable)
+}
+
+func (repository AppAuthMigrationsRepository) FindByID(key AppAuthMigrationsPrimaryKey) (*AppAuthMigrationsRow, error) {
+	row, err := repository.repository.FindByID(map[string]any{"feature": key.Feature, "version": key.Version})
+	if err != nil || row == nil {
+		return nil, err
+	}
+	value, err := orm.DecodeRow[AppAuthMigrationsRow](row, appAuthMigrationsTable)
+	if err != nil {
+		return nil, err
+	}
+	return &value, nil
+}
+
+func (repository AppAuthMigrationsRepository) FindMany(options orm.FindMany) ([]AppAuthMigrationsRow, error) {
+	rows, err := repository.repository.Find(options)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]AppAuthMigrationsRow, 0, len(rows))
+	for _, row := range rows {
+		value, err := orm.DecodeRow[AppAuthMigrationsRow](row, appAuthMigrationsTable)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, value)
+	}
+	return result, nil
+}
+
+func (repository AppAuthMigrationsRepository) Update(key AppAuthMigrationsPrimaryKey, patch AppAuthMigrationsUpdate) (AppAuthMigrationsRow, error) {
+	values := map[string]any{}
+	if patch.AppliedAt.Set {
+		if patch.AppliedAt.Null {
+			values["applied_at"] = nil
+		} else {
+			values["applied_at"] = patch.AppliedAt.Value
+		}
+	}
+	if patch.Digest.Set {
+		if patch.Digest.Null {
+			values["digest"] = nil
+		} else {
+			values["digest"] = patch.Digest.Value
+		}
+	}
+	if patch.Name.Set {
+		if patch.Name.Null {
+			values["name"] = nil
+		} else {
+			values["name"] = patch.Name.Value
+		}
+	}
+	if patch.Phase.Set {
+		if patch.Phase.Null {
+			values["phase"] = nil
+		} else {
+			values["phase"] = patch.Phase.Value
+		}
+	}
+	row, err := repository.repository.Update(map[string]any{"feature": key.Feature, "version": key.Version}, values)
+	if err != nil {
+		return AppAuthMigrationsRow{}, err
+	}
+	return orm.DecodeRow[AppAuthMigrationsRow](row, appAuthMigrationsTable)
+}
+
+func (repository AppAuthMigrationsRepository) UpdateIf(key AppAuthMigrationsPrimaryKey, condition orm.Filter, patch AppAuthMigrationsUpdate) (*AppAuthMigrationsRow, error) {
+	values := map[string]any{}
+	if patch.AppliedAt.Set {
+		if patch.AppliedAt.Null {
+			values["applied_at"] = nil
+		} else {
+			values["applied_at"] = patch.AppliedAt.Value
+		}
+	}
+	if patch.Digest.Set {
+		if patch.Digest.Null {
+			values["digest"] = nil
+		} else {
+			values["digest"] = patch.Digest.Value
+		}
+	}
+	if patch.Name.Set {
+		if patch.Name.Null {
+			values["name"] = nil
+		} else {
+			values["name"] = patch.Name.Value
+		}
+	}
+	if patch.Phase.Set {
+		if patch.Phase.Null {
+			values["phase"] = nil
+		} else {
+			values["phase"] = patch.Phase.Value
+		}
+	}
+	row, err := repository.repository.UpdateIf(map[string]any{"feature": key.Feature, "version": key.Version}, condition, values)
+	if err != nil || row == nil {
+		return nil, err
+	}
+	value, err := orm.DecodeRow[AppAuthMigrationsRow](row, appAuthMigrationsTable)
+	if err != nil {
+		return nil, err
+	}
+	return &value, nil
+}
+
+func (repository AppAuthMigrationsRepository) Delete(key AppAuthMigrationsPrimaryKey) (bool, error) {
+	return repository.repository.Delete(map[string]any{"feature": key.Feature, "version": key.Version})
 }
 
 var appAuthRateLimitsTable = orm.Table{Name: "app_auth_rate_limits", Primary: []string{"action", "key_hash"}, Columns: []orm.Column{
@@ -1158,39 +1622,357 @@ func (repository AppAuthSessionsRepository) Delete(key AppAuthSessionsPrimaryKey
 	return repository.repository.Delete(map[string]any{"id": key.ID})
 }
 
+var appAuthSignupRequestsTable = orm.Table{Name: "app_auth_signup_requests", Primary: []string{"id"}, Columns: []orm.Column{
+	{Name: "attempts", Kind: "integer", Nullable: false, Optional: true, Primary: false},
+	{Name: "code_expires_at", Kind: "timestamp", Nullable: false, Optional: false, Primary: false},
+	{Name: "code_hash", Kind: "string", Nullable: false, Optional: false, Primary: false},
+	{Name: "created_at", Kind: "timestamp", Nullable: false, Optional: true, Primary: false},
+	{Name: "email", Kind: "string", Nullable: false, Optional: false, Primary: false},
+	{Name: "expires_at", Kind: "timestamp", Nullable: false, Optional: false, Primary: false},
+	{Name: "id", Kind: "id", Nullable: false, Optional: true, Primary: true},
+	{Name: "invite_id", Kind: "id", Nullable: true, Optional: true, Primary: false},
+	{Name: "password_hash", Kind: "string", Nullable: false, Optional: false, Primary: false},
+	{Name: "updated_at", Kind: "timestamp", Nullable: false, Optional: true, Primary: false},
+}}
+
+type AppAuthSignupRequestsRow struct {
+	Attempts      int32   `json:"attempts"`
+	CodeExpiresAt string  `json:"code_expires_at"`
+	CodeHash      string  `json:"code_hash"`
+	CreatedAt     string  `json:"created_at"`
+	Email         string  `json:"email"`
+	ExpiresAt     string  `json:"expires_at"`
+	ID            string  `json:"id"`
+	InviteID      *string `json:"invite_id"`
+	PasswordHash  string  `json:"password_hash"`
+	UpdatedAt     string  `json:"updated_at"`
+}
+
+type AppAuthSignupRequestsInsert struct {
+	Attempts      orm.Optional[int32]
+	CodeExpiresAt string
+	CodeHash      string
+	CreatedAt     orm.Optional[string]
+	Email         string
+	ExpiresAt     string
+	ID            orm.Optional[string]
+	InviteID      orm.Optional[string]
+	PasswordHash  string
+	UpdatedAt     orm.Optional[string]
+}
+
+type AppAuthSignupRequestsUpdate struct {
+	Attempts      orm.Optional[int32]
+	CodeExpiresAt orm.Optional[string]
+	CodeHash      orm.Optional[string]
+	CreatedAt     orm.Optional[string]
+	Email         orm.Optional[string]
+	ExpiresAt     orm.Optional[string]
+	InviteID      orm.Optional[string]
+	PasswordHash  orm.Optional[string]
+	UpdatedAt     orm.Optional[string]
+}
+
+type AppAuthSignupRequestsPrimaryKey struct {
+	ID string
+}
+
+type AppAuthSignupRequestsColumns struct {
+	Attempts      orm.Field[int32]
+	CodeExpiresAt orm.Field[string]
+	CodeHash      orm.Field[string]
+	CreatedAt     orm.Field[string]
+	Email         orm.Field[string]
+	ExpiresAt     orm.Field[string]
+	ID            orm.Field[string]
+	InviteID      orm.Field[string]
+	PasswordHash  orm.Field[string]
+	UpdatedAt     orm.Field[string]
+}
+
+type AppAuthSignupRequestsRepository struct{ repository orm.Repository }
+
+func (repository AppAuthSignupRequestsRepository) Columns() AppAuthSignupRequestsColumns {
+	return AppAuthSignupRequestsColumns{
+		Attempts:      orm.Field[int32]{Name: "attempts"},
+		CodeExpiresAt: orm.Field[string]{Name: "code_expires_at"},
+		CodeHash:      orm.Field[string]{Name: "code_hash"},
+		CreatedAt:     orm.Field[string]{Name: "created_at"},
+		Email:         orm.Field[string]{Name: "email"},
+		ExpiresAt:     orm.Field[string]{Name: "expires_at"},
+		ID:            orm.Field[string]{Name: "id"},
+		InviteID:      orm.Field[string]{Name: "invite_id"},
+		PasswordHash:  orm.Field[string]{Name: "password_hash"},
+		UpdatedAt:     orm.Field[string]{Name: "updated_at"},
+	}
+}
+
+func (repository AppAuthSignupRequestsRepository) Insert(input AppAuthSignupRequestsInsert) (AppAuthSignupRequestsRow, error) {
+	values := map[string]any{}
+	if input.Attempts.Set {
+		if input.Attempts.Null {
+			values["attempts"] = nil
+		} else {
+			values["attempts"] = input.Attempts.Value
+		}
+	}
+	values["code_expires_at"] = input.CodeExpiresAt
+	values["code_hash"] = input.CodeHash
+	if input.CreatedAt.Set {
+		if input.CreatedAt.Null {
+			values["created_at"] = nil
+		} else {
+			values["created_at"] = input.CreatedAt.Value
+		}
+	}
+	values["email"] = input.Email
+	values["expires_at"] = input.ExpiresAt
+	if input.ID.Set {
+		if input.ID.Null {
+			values["id"] = nil
+		} else {
+			values["id"] = input.ID.Value
+		}
+	}
+	if input.InviteID.Set {
+		if input.InviteID.Null {
+			values["invite_id"] = nil
+		} else {
+			values["invite_id"] = input.InviteID.Value
+		}
+	}
+	values["password_hash"] = input.PasswordHash
+	if input.UpdatedAt.Set {
+		if input.UpdatedAt.Null {
+			values["updated_at"] = nil
+		} else {
+			values["updated_at"] = input.UpdatedAt.Value
+		}
+	}
+	row, err := repository.repository.Insert(values)
+	if err != nil {
+		return AppAuthSignupRequestsRow{}, err
+	}
+	return orm.DecodeRow[AppAuthSignupRequestsRow](row, appAuthSignupRequestsTable)
+}
+
+func (repository AppAuthSignupRequestsRepository) FindByID(key AppAuthSignupRequestsPrimaryKey) (*AppAuthSignupRequestsRow, error) {
+	row, err := repository.repository.FindByID(map[string]any{"id": key.ID})
+	if err != nil || row == nil {
+		return nil, err
+	}
+	value, err := orm.DecodeRow[AppAuthSignupRequestsRow](row, appAuthSignupRequestsTable)
+	if err != nil {
+		return nil, err
+	}
+	return &value, nil
+}
+
+func (repository AppAuthSignupRequestsRepository) FindMany(options orm.FindMany) ([]AppAuthSignupRequestsRow, error) {
+	rows, err := repository.repository.Find(options)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]AppAuthSignupRequestsRow, 0, len(rows))
+	for _, row := range rows {
+		value, err := orm.DecodeRow[AppAuthSignupRequestsRow](row, appAuthSignupRequestsTable)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, value)
+	}
+	return result, nil
+}
+
+func (repository AppAuthSignupRequestsRepository) Update(key AppAuthSignupRequestsPrimaryKey, patch AppAuthSignupRequestsUpdate) (AppAuthSignupRequestsRow, error) {
+	values := map[string]any{}
+	if patch.Attempts.Set {
+		if patch.Attempts.Null {
+			values["attempts"] = nil
+		} else {
+			values["attempts"] = patch.Attempts.Value
+		}
+	}
+	if patch.CodeExpiresAt.Set {
+		if patch.CodeExpiresAt.Null {
+			values["code_expires_at"] = nil
+		} else {
+			values["code_expires_at"] = patch.CodeExpiresAt.Value
+		}
+	}
+	if patch.CodeHash.Set {
+		if patch.CodeHash.Null {
+			values["code_hash"] = nil
+		} else {
+			values["code_hash"] = patch.CodeHash.Value
+		}
+	}
+	if patch.CreatedAt.Set {
+		if patch.CreatedAt.Null {
+			values["created_at"] = nil
+		} else {
+			values["created_at"] = patch.CreatedAt.Value
+		}
+	}
+	if patch.Email.Set {
+		if patch.Email.Null {
+			values["email"] = nil
+		} else {
+			values["email"] = patch.Email.Value
+		}
+	}
+	if patch.ExpiresAt.Set {
+		if patch.ExpiresAt.Null {
+			values["expires_at"] = nil
+		} else {
+			values["expires_at"] = patch.ExpiresAt.Value
+		}
+	}
+	if patch.InviteID.Set {
+		if patch.InviteID.Null {
+			values["invite_id"] = nil
+		} else {
+			values["invite_id"] = patch.InviteID.Value
+		}
+	}
+	if patch.PasswordHash.Set {
+		if patch.PasswordHash.Null {
+			values["password_hash"] = nil
+		} else {
+			values["password_hash"] = patch.PasswordHash.Value
+		}
+	}
+	if patch.UpdatedAt.Set {
+		if patch.UpdatedAt.Null {
+			values["updated_at"] = nil
+		} else {
+			values["updated_at"] = patch.UpdatedAt.Value
+		}
+	}
+	row, err := repository.repository.Update(map[string]any{"id": key.ID}, values)
+	if err != nil {
+		return AppAuthSignupRequestsRow{}, err
+	}
+	return orm.DecodeRow[AppAuthSignupRequestsRow](row, appAuthSignupRequestsTable)
+}
+
+func (repository AppAuthSignupRequestsRepository) UpdateIf(key AppAuthSignupRequestsPrimaryKey, condition orm.Filter, patch AppAuthSignupRequestsUpdate) (*AppAuthSignupRequestsRow, error) {
+	values := map[string]any{}
+	if patch.Attempts.Set {
+		if patch.Attempts.Null {
+			values["attempts"] = nil
+		} else {
+			values["attempts"] = patch.Attempts.Value
+		}
+	}
+	if patch.CodeExpiresAt.Set {
+		if patch.CodeExpiresAt.Null {
+			values["code_expires_at"] = nil
+		} else {
+			values["code_expires_at"] = patch.CodeExpiresAt.Value
+		}
+	}
+	if patch.CodeHash.Set {
+		if patch.CodeHash.Null {
+			values["code_hash"] = nil
+		} else {
+			values["code_hash"] = patch.CodeHash.Value
+		}
+	}
+	if patch.CreatedAt.Set {
+		if patch.CreatedAt.Null {
+			values["created_at"] = nil
+		} else {
+			values["created_at"] = patch.CreatedAt.Value
+		}
+	}
+	if patch.Email.Set {
+		if patch.Email.Null {
+			values["email"] = nil
+		} else {
+			values["email"] = patch.Email.Value
+		}
+	}
+	if patch.ExpiresAt.Set {
+		if patch.ExpiresAt.Null {
+			values["expires_at"] = nil
+		} else {
+			values["expires_at"] = patch.ExpiresAt.Value
+		}
+	}
+	if patch.InviteID.Set {
+		if patch.InviteID.Null {
+			values["invite_id"] = nil
+		} else {
+			values["invite_id"] = patch.InviteID.Value
+		}
+	}
+	if patch.PasswordHash.Set {
+		if patch.PasswordHash.Null {
+			values["password_hash"] = nil
+		} else {
+			values["password_hash"] = patch.PasswordHash.Value
+		}
+	}
+	if patch.UpdatedAt.Set {
+		if patch.UpdatedAt.Null {
+			values["updated_at"] = nil
+		} else {
+			values["updated_at"] = patch.UpdatedAt.Value
+		}
+	}
+	row, err := repository.repository.UpdateIf(map[string]any{"id": key.ID}, condition, values)
+	if err != nil || row == nil {
+		return nil, err
+	}
+	value, err := orm.DecodeRow[AppAuthSignupRequestsRow](row, appAuthSignupRequestsTable)
+	if err != nil {
+		return nil, err
+	}
+	return &value, nil
+}
+
+func (repository AppAuthSignupRequestsRepository) Delete(key AppAuthSignupRequestsPrimaryKey) (bool, error) {
+	return repository.repository.Delete(map[string]any{"id": key.ID})
+}
+
 var appAuthUsersTable = orm.Table{Name: "app_auth_users", Primary: []string{"id"}, Columns: []orm.Column{
 	{Name: "created_at", Kind: "timestamp", Nullable: false, Optional: true, Primary: false},
 	{Name: "disabled_at", Kind: "timestamp", Nullable: true, Optional: true, Primary: false},
 	{Name: "email", Kind: "string", Nullable: false, Optional: false, Primary: false},
+	{Name: "email_verified_at", Kind: "timestamp", Nullable: true, Optional: true, Primary: false},
 	{Name: "id", Kind: "id", Nullable: false, Optional: true, Primary: true},
 	{Name: "password_hash", Kind: "string", Nullable: true, Optional: true, Primary: false},
 	{Name: "session_version", Kind: "integer", Nullable: false, Optional: true, Primary: false},
 }}
 
 type AppAuthUsersRow struct {
-	CreatedAt      string  `json:"created_at"`
-	DisabledAt     *string `json:"disabled_at"`
-	Email          string  `json:"email"`
-	ID             string  `json:"id"`
-	PasswordHash   *string `json:"password_hash"`
-	SessionVersion int32   `json:"session_version"`
+	CreatedAt       string  `json:"created_at"`
+	DisabledAt      *string `json:"disabled_at"`
+	Email           string  `json:"email"`
+	EmailVerifiedAt *string `json:"email_verified_at"`
+	ID              string  `json:"id"`
+	PasswordHash    *string `json:"password_hash"`
+	SessionVersion  int32   `json:"session_version"`
 }
 
 type AppAuthUsersInsert struct {
-	CreatedAt      orm.Optional[string]
-	DisabledAt     orm.Optional[string]
-	Email          string
-	ID             orm.Optional[string]
-	PasswordHash   orm.Optional[string]
-	SessionVersion orm.Optional[int32]
+	CreatedAt       orm.Optional[string]
+	DisabledAt      orm.Optional[string]
+	Email           string
+	EmailVerifiedAt orm.Optional[string]
+	ID              orm.Optional[string]
+	PasswordHash    orm.Optional[string]
+	SessionVersion  orm.Optional[int32]
 }
 
 type AppAuthUsersUpdate struct {
-	CreatedAt      orm.Optional[string]
-	DisabledAt     orm.Optional[string]
-	Email          orm.Optional[string]
-	PasswordHash   orm.Optional[string]
-	SessionVersion orm.Optional[int32]
+	CreatedAt       orm.Optional[string]
+	DisabledAt      orm.Optional[string]
+	Email           orm.Optional[string]
+	EmailVerifiedAt orm.Optional[string]
+	PasswordHash    orm.Optional[string]
+	SessionVersion  orm.Optional[int32]
 }
 
 type AppAuthUsersPrimaryKey struct {
@@ -1198,24 +1980,26 @@ type AppAuthUsersPrimaryKey struct {
 }
 
 type AppAuthUsersColumns struct {
-	CreatedAt      orm.Field[string]
-	DisabledAt     orm.Field[string]
-	Email          orm.Field[string]
-	ID             orm.Field[string]
-	PasswordHash   orm.Field[string]
-	SessionVersion orm.Field[int32]
+	CreatedAt       orm.Field[string]
+	DisabledAt      orm.Field[string]
+	Email           orm.Field[string]
+	EmailVerifiedAt orm.Field[string]
+	ID              orm.Field[string]
+	PasswordHash    orm.Field[string]
+	SessionVersion  orm.Field[int32]
 }
 
 type AppAuthUsersRepository struct{ repository orm.Repository }
 
 func (repository AppAuthUsersRepository) Columns() AppAuthUsersColumns {
 	return AppAuthUsersColumns{
-		CreatedAt:      orm.Field[string]{Name: "created_at"},
-		DisabledAt:     orm.Field[string]{Name: "disabled_at"},
-		Email:          orm.Field[string]{Name: "email"},
-		ID:             orm.Field[string]{Name: "id"},
-		PasswordHash:   orm.Field[string]{Name: "password_hash"},
-		SessionVersion: orm.Field[int32]{Name: "session_version"},
+		CreatedAt:       orm.Field[string]{Name: "created_at"},
+		DisabledAt:      orm.Field[string]{Name: "disabled_at"},
+		Email:           orm.Field[string]{Name: "email"},
+		EmailVerifiedAt: orm.Field[string]{Name: "email_verified_at"},
+		ID:              orm.Field[string]{Name: "id"},
+		PasswordHash:    orm.Field[string]{Name: "password_hash"},
+		SessionVersion:  orm.Field[int32]{Name: "session_version"},
 	}
 }
 
@@ -1236,6 +2020,13 @@ func (repository AppAuthUsersRepository) Insert(input AppAuthUsersInsert) (AppAu
 		}
 	}
 	values["email"] = input.Email
+	if input.EmailVerifiedAt.Set {
+		if input.EmailVerifiedAt.Null {
+			values["email_verified_at"] = nil
+		} else {
+			values["email_verified_at"] = input.EmailVerifiedAt.Value
+		}
+	}
 	if input.ID.Set {
 		if input.ID.Null {
 			values["id"] = nil
@@ -1315,6 +2106,13 @@ func (repository AppAuthUsersRepository) Update(key AppAuthUsersPrimaryKey, patc
 			values["email"] = patch.Email.Value
 		}
 	}
+	if patch.EmailVerifiedAt.Set {
+		if patch.EmailVerifiedAt.Null {
+			values["email_verified_at"] = nil
+		} else {
+			values["email_verified_at"] = patch.EmailVerifiedAt.Value
+		}
+	}
 	if patch.PasswordHash.Set {
 		if patch.PasswordHash.Null {
 			values["password_hash"] = nil
@@ -1357,6 +2155,13 @@ func (repository AppAuthUsersRepository) UpdateIf(key AppAuthUsersPrimaryKey, co
 			values["email"] = nil
 		} else {
 			values["email"] = patch.Email.Value
+		}
+	}
+	if patch.EmailVerifiedAt.Set {
+		if patch.EmailVerifiedAt.Null {
+			values["email_verified_at"] = nil
+		} else {
+			values["email_verified_at"] = patch.EmailVerifiedAt.Value
 		}
 	}
 	if patch.PasswordHash.Set {
