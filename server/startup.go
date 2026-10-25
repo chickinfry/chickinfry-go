@@ -29,18 +29,18 @@ func InitializeStatus() int32 {
 func initialize() (err error) {
 	defer func() {
 		if recover() != nil {
-			err = &Error{Status: 500, Code: "operation_failed"}
+			err = &OperationError{Status: 500, Code: "operation_failed"}
 		}
 	}()
 	if startup != nil {
 		value, failure := startup()
 		if failure != nil || value == nil {
-			return &Error{Status: 500, Code: "operation_failed"}
+			return &OperationError{Status: 500, Code: "operation_failed"}
 		}
 		handler = value
 	}
 	if handler == nil {
-		return &Error{Status: 500, Code: "operation_failed"}
+		return &OperationError{Status: 500, Code: "operation_failed"}
 	}
 	return nil
 }

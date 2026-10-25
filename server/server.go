@@ -12,13 +12,14 @@ import (
 	"github.com/chickinfry/chickinfry-go/server/host"
 )
 
-// Error is an explicit application failure safe to return to a caller.
-type Error struct {
+// OperationError is an explicit application failure safe to return to a caller.
+type OperationError struct {
 	Status int
 	Code   string
 }
 
-func (err *Error) Error() string { return err.Code }
+// Error returns the operation code without adding response details.
+func (err *OperationError) Error() string { return err.Code }
 
 // ErrNotImplemented marks an explicitly unimplemented operation when returned.
 var ErrNotImplemented error = errors.New("not_implemented")
@@ -94,11 +95,11 @@ func Handle(size int32) (status int32) {
 	request.call = host.Call
 	value, err := handler(request)
 	if err != nil {
-		failure, ok := errors.AsType[*Error](err)
+		failure, ok := errors.AsType[*OperationError](err)
 		if errors.Is(err, ErrNotImplemented) {
-			failure = &Error{Status: 501, Code: "not_implemented"}
+			failure = &OperationError{Status: 501, Code: "not_implemented"}
 		} else if !ok || failure == nil || failure.Status < 400 || failure.Status > 599 || failure.Code == "" {
-			failure = &Error{Status: 500, Code: "operation_failed"}
+			failure = &OperationError{Status: 500, Code: "operation_failed"}
 		}
 		output, _ = json.Marshal(map[string]string{"error": failure.Code})
 		return int32(failure.Status)
@@ -123,17 +124,17 @@ func Output() (*byte, int32) {
 func DecodeInput(data []byte, fields []string, value any) error {
 	var object map[string]json.RawMessage
 	if host.Decode(data, &object) != nil || object == nil || !validUnicodeJSON(data) {
-		return &Error{Status: 400, Code: "invalid_input"}
+		return &OperationError{Status: 400, Code: "invalid_input"}
 	}
 	for _, field := range fields {
 		var text string
 		if raw, ok := object[field]; !ok || string(raw) == "null" || json.Unmarshal(raw, &text) != nil {
-			return &Error{Status: 400, Code: "invalid_input"}
+			return &OperationError{Status: 400, Code: "invalid_input"}
 		}
 	}
 	// API inputs permit extra fields; generated models discard them.
 	if err := json.Unmarshal(data, value); err != nil {
-		return &Error{Status: 400, Code: "invalid_input"}
+		return &OperationError{Status: 400, Code: "invalid_input"}
 	}
 	return nil
 }

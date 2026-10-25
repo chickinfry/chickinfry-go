@@ -45,7 +45,7 @@ func rotateFixture(t *testing.T, checked time.Time, policy SessionPolicy, sessio
 func requireRejected(t *testing.T, checked time.Time, policy SessionPolicy, session private.AppAuthSessionsRow, current, latest *private.AppAuthRefreshTokensRow, user *private.AppAuthUsersRow) {
 	t.Helper()
 	patch, family, err := refreshExpirations(checked, policy, session, current, latest, user)
-	failure, ok := errors.AsType[*server.Error](err)
+	failure, ok := errors.AsType[*server.OperationError](err)
 	if !ok || failure.Status != 401 {
 		t.Fatalf("expected rejection, got %v", err)
 	}

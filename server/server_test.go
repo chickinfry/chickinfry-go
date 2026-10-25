@@ -108,18 +108,23 @@ func TestDispatchErrors(t *testing.T) {
 	}{
 		{"sentinel", func(Request) (any, error) { return nil, ErrNotImplemented }, 501, "not_implemented"},
 		{"wrapped sentinel", func(Request) (any, error) { return nil, fmt.Errorf("private: %w", ErrNotImplemented) }, 501, "not_implemented"},
-		{"explicit error", func(Request) (any, error) { return nil, &Error{Status: 409, Code: "conflict"} }, 409, "conflict"},
+		{"explicit error", func(Request) (any, error) { return nil, &OperationError{Status: 409, Code: "conflict"} }, 409, "conflict"},
 		{"wrapped explicit error", func(Request) (any, error) {
-			return nil, fmt.Errorf("private: %w", &Error{Status: 403, Code: "forbidden"})
+			return nil, fmt.Errorf("private: %w", &OperationError{Status: 403, Code: "forbidden"})
 		}, 403, "forbidden"},
 		{"ordinary error", func(Request) (any, error) { return nil, errors.New("private failure") }, 500, "operation_failed"},
 		{"same error text", func(Request) (any, error) { return nil, errors.New("not_implemented") }, 500, "operation_failed"},
 		{"ordinary panic", func(Request) (any, error) { panic("private failure") }, 500, "operation_failed"},
 		{"same panic text", func(Request) (any, error) { panic("not_implemented") }, 500, "operation_failed"},
 		{"sentinel panic", func(Request) (any, error) { panic(ErrNotImplemented) }, 500, "operation_failed"},
-		{"nil explicit error", func(Request) (any, error) { return nil, (*Error)(nil) }, 500, "operation_failed"},
-		{"invalid status", func(Request) (any, error) { return nil, &Error{Status: 200, Code: "private"} }, 500, "operation_failed"},
-		{"invalid code", func(Request) (any, error) { return nil, &Error{Status: 501} }, 500, "operation_failed"},
+		{"nil explicit error", func(Request) (any, error) { return nil, (*OperationError)(nil) }, 500, "operation_failed"},
+		{"invalid status", func(Request) (any, error) { return nil, &OperationError{Status: 200, Code: "private"} }, 500, "operation_failed"},
+		{"redirect status", func(Request) (any, error) { return nil, &OperationError{Status: 302, Code: "private"} }, 500, "operation_failed"},
+		{"below error status", func(Request) (any, error) { return nil, &OperationError{Status: 399, Code: "private"} }, 500, "operation_failed"},
+		{"first error status", func(Request) (any, error) { return nil, &OperationError{Status: 400, Code: "invalid_input"} }, 400, "invalid_input"},
+		{"last error status", func(Request) (any, error) { return nil, &OperationError{Status: 599, Code: "operation_failed"} }, 599, "operation_failed"},
+		{"above error status", func(Request) (any, error) { return nil, &OperationError{Status: 600, Code: "private"} }, 500, "operation_failed"},
+		{"invalid code", func(Request) (any, error) { return nil, &OperationError{Status: 501} }, 500, "operation_failed"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			resetRuntime(t)

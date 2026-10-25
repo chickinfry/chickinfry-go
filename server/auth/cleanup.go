@@ -97,7 +97,7 @@ func (auth *Auth) cleanup(cutoff string) (err error) {
 				}
 				if _, err := sessionExpiry(checked, auth.policy, *session, latest); err == nil {
 					return nil
-				} else if failure, ok := errors.AsType[*server.Error](err); !ok || failure.Status != 401 {
+				} else if failure, ok := errors.AsType[*server.OperationError](err); !ok || failure.Status != 401 {
 					return err
 				}
 			}

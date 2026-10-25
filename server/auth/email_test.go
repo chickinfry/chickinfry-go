@@ -52,7 +52,7 @@ func TestEmailCorpus(t *testing.T) {
 				}
 				return
 			}
-			failure, ok := errors.AsType[*server.Error](err)
+			failure, ok := errors.AsType[*server.OperationError](err)
 			if c.Error != "invalid_input" || !ok || failure.Status != 400 || failure.Code != c.Error || got != "" {
 				t.Fatalf("normalizeEmail(%q) = %q, %v; want 400 invalid_input", c.Input, got, err)
 			}
@@ -83,7 +83,7 @@ func TestEmailSigmaContext(t *testing.T) {
 
 func TestEmailRejectsInvalidUTF8(t *testing.T) {
 	_, err := normalizeEmail("\xff@example.test")
-	failure, ok := errors.AsType[*server.Error](err)
+	failure, ok := errors.AsType[*server.OperationError](err)
 	if !ok || failure.Status != 400 || failure.Code != "invalid_input" {
 		t.Fatalf("invalid UTF-8 email: %v; want 400 invalid_input", err)
 	}

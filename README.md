@@ -102,6 +102,14 @@ for HTTP 501 with `{"error":"not_implemented"}`. Unexpected errors and all panic
 remain sanitized HTTP 500 failures. Startup failures always return 500, even if
 the callback returns `ErrNotImplemented`.
 
+Return `&server.OperationError{Code: "conflict", Status: 409}` for an explicit
+operation failure. Dispatch validates the mutable value before sending it;
+statuses outside 400 through 599 or an empty code become `operation_failed`/500.
+Its `Error()` method returns only the code. The server type is distinct from the
+client runtime's received `OperationError`; remote errors are not trusted as
+public server failures. Unavailable authentication operations return `not_found`/404.
+The former `server.Error` name has no compatibility alias.
+
 Authentication continues to expose only `server.Session` (session ID and public
 user ID/email). Protected dispatch must reject a missing session before invoking
 business code; public dispatch may pass a nil session. Session lookup errors must

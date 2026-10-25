@@ -96,7 +96,7 @@ func TestStartupFailures(t *testing.T) {
 					case "sentinel":
 						return value, ErrNotImplemented
 					case "public error":
-						return value, &Error{Status: 401, Code: "unauthenticated"}
+						return value, &OperationError{Status: 401, Code: "unauthenticated"}
 					case "panic":
 						panic("private startup failure")
 					case "sentinel panic":
@@ -107,7 +107,7 @@ func TestStartupFailures(t *testing.T) {
 				})
 			}
 			first := Initialize()
-			failure, ok := errors.AsType[*Error](first)
+			failure, ok := errors.AsType[*OperationError](first)
 			if !ok || failure.Status != 500 || failure.Code != "operation_failed" {
 				t.Fatal("startup failure was not sanitized")
 			}

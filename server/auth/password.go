@@ -15,7 +15,7 @@ var passwordFormat = regexp.MustCompile(`^scrypt\$32768\$8\$3\$([a-f0-9]{32})\$(
 
 func validatePassword(password string) error {
 	if !utf8.ValidString(password) || utf8.RuneCountInString(password) < 15 || len(password) > 1024 {
-		return &server.Error{Status: 400, Code: "invalid_input"}
+		return &server.OperationError{Status: 400, Code: "invalid_input"}
 	}
 	return nil
 }

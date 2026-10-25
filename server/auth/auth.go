@@ -68,7 +68,7 @@ func New(connection *database.Connection, hooks Hooks, policies ...SessionPolicy
 	}
 }
 
-func fail(status int, code string) error     { return &server.Error{Status: status, Code: code} }
+func fail(status int, code string) error     { return &server.OperationError{Status: status, Code: code} }
 func set[T any](value T) orm.Optional[T]     { return orm.Optional[T]{Set: true, Value: value} }
 func null[T any]() orm.Optional[T]           { return orm.Optional[T]{Set: true, Null: true} }
 func timestamp(value time.Time) string       { return value.UTC().Format("2006-01-02T15:04:05.000000Z") }
@@ -324,7 +324,7 @@ func (auth *Auth) session(authorization *string) (*sessionInfo, error) {
 		}
 		lifetime, err := sessionExpiry(checked, auth.policy, *locked, latest)
 		if err != nil {
-			if failure, ok := errors.AsType[*server.Error](err); !ok || failure.Status != 401 {
+			if failure, ok := errors.AsType[*server.OperationError](err); !ok || failure.Status != 401 {
 				return err
 			}
 			_, err = sessions.Update(private.AppAuthSessionsPrimaryKey{ID: locked.ID}, private.AppAuthSessionsUpdate{RevokedAt: set(timestamp(checked))})
@@ -403,7 +403,7 @@ func (auth *Auth) refresh(value string) (Tokens, error) {
 			return err
 		}
 		if err != nil {
-			if failure, ok := errors.AsType[*server.Error](err); ok && failure.Status == 401 {
+			if failure, ok := errors.AsType[*server.OperationError](err); ok && failure.Status == 401 {
 				return revoke()
 			}
 			return err
@@ -449,7 +449,7 @@ func (auth *Auth) Handle(request server.Request, emailPassword bool) (any, error
 	switch request.Path {
 	case "/auth.signup", "/auth.signin":
 		if !emailPassword {
-			return nil, fail(404, "operation_not_found")
+			return nil, fail(404, "not_found")
 		}
 		var input struct {
 			Email    string `json:"email"`
@@ -505,7 +505,7 @@ func (auth *Auth) Handle(request server.Request, emailPassword bool) (any, error
 		_, err = auth.db.AppAuthSessions.UpdateIf(private.AppAuthSessionsPrimaryKey{ID: session.ID}, auth.db.AppAuthSessions.Columns().RevokedAt.IsNull(), private.AppAuthSessionsUpdate{RevokedAt: set(now())})
 		return map[string]string{"status": "signed_out"}, err
 	default:
-		return nil, fail(404, "operation_not_found")
+		return nil, fail(404, "not_found")
 	}
 	if err != nil {
 		return nil, err

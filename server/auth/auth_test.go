@@ -20,6 +20,19 @@ func TestAuthenticationFailureCannotReturnSuccess(t *testing.T) {
 	}
 }
 
+func TestUnavailableAuthenticationOperations(t *testing.T) {
+	for _, path := range []string{"/auth.signup", "/auth.signin", "/auth.unknown"} {
+		t.Run(path, func(t *testing.T) {
+			authentication := New(database.New(1), Hooks{})
+			_, err := authentication.Handle(server.Request{RID: 1, Path: path}, false)
+			failure, ok := errors.AsType[*server.OperationError](err)
+			if !ok || failure.Status != 404 || failure.Code != "not_found" {
+				t.Fatalf("unavailable operation = %v, want not_found / 404", err)
+			}
+		})
+	}
+}
+
 func TestSessionFailureCannotBecomeAnonymous(t *testing.T) {
 	authentication := New(database.New(1), Hooks{})
 	if session, err := authentication.Session(nil); session != nil || err != nil {
@@ -40,7 +53,7 @@ func TestSessionFailureCannotBecomeAnonymous(t *testing.T) {
 			t.Fatalf("session failure became anonymous: valid=%t", valid)
 		}
 		if !valid {
-			failure, ok := errors.AsType[*server.Error](err)
+			failure, ok := errors.AsType[*server.OperationError](err)
 			if !ok || failure.Status != 401 || failure.Code != "invalid_token" {
 				t.Fatal("invalid bearer lost its rejection")
 			}
@@ -51,7 +64,7 @@ func TestSessionFailureCannotBecomeAnonymous(t *testing.T) {
 func TestHookPanicStaysWithinItsCommitBoundary(t *testing.T) {
 	for _, code := range []string{"user_creation_failed", "user_created_effect_failed"} {
 		err := runHook(code, func() error { panic("private fixture error") })
-		failure, ok := errors.AsType[*server.Error](err)
+		failure, ok := errors.AsType[*server.OperationError](err)
 		if !ok || failure.Status != 500 || failure.Code != code {
 			t.Fatal("hook panic lost its safe error classification")
 		}
