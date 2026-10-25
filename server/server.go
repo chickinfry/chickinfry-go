@@ -2,12 +2,15 @@
 package server
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"regexp"
 	"slices"
 	"strconv"
+	"unicode/utf8"
 
 	"github.com/chickinfry/chickinfry-go/server/host"
 )
@@ -84,7 +87,7 @@ func Handle(size int32) (status int32) {
 		return 400
 	}
 	var request Request
-	if err := host.Decode(input, &request); err != nil || request.RID < 1 || request.RID > host.MaxHandle {
+	if err := decodeRequest(input, &request); err != nil || request.RID < 1 || request.RID > host.MaxHandle {
 		output = []byte(`{"error":"invalid_input"}`)
 		return 400
 	}
@@ -112,6 +115,64 @@ func Handle(size int32) (status int32) {
 	return 200
 }
 
+func decodeRequest(frame []byte, request *Request) error {
+	decoder := json.NewDecoder(bytes.NewReader(frame))
+	if token, err := decoder.Token(); err != nil || token != json.Delim('{') {
+		return errors.New("invalid request frame")
+	}
+	var bodySize *int64
+	for decoder.More() {
+		name, err := decoder.Token()
+		if err != nil {
+			return err
+		}
+		var raw json.RawMessage
+		var start, end int64
+		if name == "body" && bodySize != nil {
+			// The byte length separates an unparsed body from the validated envelope.
+			tail := bytes.TrimLeft(frame[decoder.InputOffset():], " \t\r\n")
+			if len(tail) == 0 || tail[0] != ':' {
+				return errors.New("invalid request frame")
+			}
+			start = int64(len(frame) - len(tail) + 1)
+			if *bodySize > int64(len(frame))-start {
+				return errors.New("invalid request body size")
+			}
+			end = start + *bodySize
+			raw = frame[start:end]
+		} else {
+			if err := decoder.Decode(&raw); err != nil {
+				return err
+			}
+			end = decoder.InputOffset()
+			start = end - int64(len(raw))
+		}
+		if name == "body_size" {
+			if err := json.Unmarshal(raw, &bodySize); err != nil || bodySize == nil || *bodySize < 0 {
+				return errors.New("invalid request body size")
+			}
+		}
+		if name == "body" {
+			// Keep the envelope's protection limit independent of the operation body.
+			metadata := append(bytes.Clone(frame[:start]), "null"...)
+			metadata = append(metadata, frame[end:]...)
+			wire := struct {
+				*Request
+				BodySize json.RawMessage `json:"body_size"`
+			}{Request: request}
+			if err := host.Decode(metadata, &wire); err != nil {
+				return err
+			}
+			if wire.BodySize != nil && bodySize == nil {
+				return errors.New("invalid request body size")
+			}
+			request.Body = raw
+			return nil
+		}
+	}
+	return host.Decode(frame, request)
+}
+
 // Output returns the response buffer; the loader copies it before releasing the instance.
 func Output() (*byte, int32) {
 	if len(output) == 0 {
@@ -120,8 +181,11 @@ func Output() (*byte, int32) {
 	return &output[0], int32(len(output))
 }
 
-// DecodeInput validates all required string fields before business dispatch.
+// DecodeInput validates request structure and required string fields before business dispatch.
 func DecodeInput(data []byte, fields []string, value any) error {
+	if err := validateInputStructure(data); err != nil {
+		return err
+	}
 	var object map[string]json.RawMessage
 	if host.Decode(data, &object) != nil || object == nil || !validUnicodeJSON(data) {
 		return &OperationError{Status: 400, Code: "invalid_input"}
@@ -137,6 +201,65 @@ func DecodeInput(data []byte, fields []string, value any) error {
 		return &OperationError{Status: 400, Code: "invalid_input"}
 	}
 	return nil
+}
+
+func validateInputStructure(data []byte) error {
+	if !utf8.Valid(data) || !validJSON(data) {
+		return &OperationError{Status: 400, Code: "invalid_json"}
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	depth := 0
+	for {
+		token, err := decoder.Token()
+		if err != nil {
+			if !errors.Is(err, io.EOF) {
+				return &OperationError{Status: 400, Code: "invalid_input"}
+			}
+			return nil
+		}
+		switch token {
+		case json.Delim('{'), json.Delim('['):
+			depth++
+			if depth > 64 {
+				return &OperationError{Status: 400, Code: "invalid_input"}
+			}
+		case json.Delim('}'), json.Delim(']'):
+			depth--
+		}
+	}
+}
+
+func validJSON(data []byte) bool {
+	// Reducing each child to null keeps total work linear and avoids the decoder's depth limit.
+	flat := make([]byte, 0, len(data))
+	var starts []int
+	inside, escaped := false, false
+	for _, c := range data {
+		if !inside {
+			switch c {
+			case '{', '[':
+				starts = append(starts, len(flat))
+			case '}', ']':
+				if len(starts) == 0 {
+					return false
+				}
+				start := starts[len(starts)-1]
+				starts = starts[:len(starts)-1]
+				flat = append(flat, c)
+				if !json.Valid(flat[start:]) {
+					return false
+				}
+				flat = append(flat[:start], "null"...)
+				continue
+			}
+		}
+		flat = append(flat, c)
+		if c == '"' && !escaped {
+			inside = !inside
+		}
+		escaped = inside && c == '\\' && !escaped
+	}
+	return len(starts) == 0 && json.Valid(flat)
 }
 
 var uuidPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)

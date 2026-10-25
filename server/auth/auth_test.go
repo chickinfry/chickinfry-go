@@ -3,11 +3,37 @@ package auth
 import (
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/chickinfry/chickinfry-go/server"
 	"github.com/chickinfry/chickinfry-go/server/database"
 )
+
+func TestAuthenticationRejectsInvalidInputStructure(t *testing.T) {
+	for _, path := range []string{"/auth.signup", "/auth.signin", "/auth.refresh", "/auth.identity", "/auth.session", "/auth.logout"} {
+		for _, test := range []struct{ value, code string }{
+			{"1e999", "invalid_input"},
+			{`"\ud800"`, "invalid_input"},
+			{`"\udc00"`, "invalid_input"},
+			{`{"\ud800":0}`, "invalid_input"},
+			{`"\ud800\u0041"`, "invalid_input"},
+			{strings.Repeat("[", 64) + strings.Repeat("]", 64), "invalid_input"},
+			{"!", "invalid_json"},
+			{"\"\xff\"", "invalid_json"},
+			{strings.Repeat("[", 65), "invalid_json"},
+			{strings.Repeat("[", 65) + "null" + strings.Repeat("]", 65) + "!", "invalid_json"},
+		} {
+			authentication := New(database.New(1), Hooks{})
+			body := json.RawMessage(`{"email":"public@example.test","password":"public test vector","refresh_token":"token","provider":"test","credential":"test","ignored":` + test.value + `}`)
+			_, err := authentication.Handle(server.Request{RID: 1, Path: path, Body: body}, true)
+			failure, ok := errors.AsType[*server.OperationError](err)
+			if !ok || failure.Status != 400 || failure.Code != test.code {
+				t.Fatalf("%s rejected %q with %v, want %s / 400", path, test.value, err, test.code)
+			}
+		}
+	}
+}
 
 func TestAuthenticationFailureCannotReturnSuccess(t *testing.T) {
 	// The native host refuses I/O; both minting paths must preserve that failure.
