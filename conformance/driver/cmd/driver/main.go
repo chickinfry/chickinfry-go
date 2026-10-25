@@ -74,7 +74,7 @@ func call(ctx context.Context, transport *chickinfry.HTTPTransport, operation st
 }
 
 func callPlain(ctx context.Context, transport *chickinfry.HTTPTransport, operation string, input json.RawMessage) (any, error) {
-	client := plain.New(inputTransport{http: transport, input: input})
+	client := plain.CreateClient(inputTransport{http: transport, input: input})
 	switch operation {
 	case "probe.echo":
 		var typed plain.ProbeEchoInput
@@ -94,7 +94,7 @@ func callPlain(ctx context.Context, transport *chickinfry.HTTPTransport, operati
 }
 
 func callAuth(ctx context.Context, transport *chickinfry.HTTPTransport, operation string, input json.RawMessage) (any, error) {
-	client := auth.New(inputTransport{http: transport, input: input})
+	client := auth.CreateClient(inputTransport{http: transport, input: input})
 	switch operation {
 	case "probe.echo":
 		var typed auth.ProbeEchoInput

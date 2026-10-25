@@ -123,9 +123,9 @@ func TestGeneratedMalformedSuccessResponses(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			output, err := plain.New(transport).Probe.Echo(t.Context(), plain.ProbeEchoInput{WireValue: "ok"})
-			failure, ok := errors.AsType[*chickinfry.OperationError](err)
-			if !ok || failure.Code != "invalid_response" || failure.Status != http.StatusAccepted || output != (plain.ProbeEchoOutput{}) {
+			output, err := plain.CreateClient(transport).Probe.Echo(t.Context(), plain.ProbeEchoInput{WireValue: "ok"})
+			failure, ok := errors.AsType[*chickinfry.ClientError](err)
+			if !ok || failure.Code != chickinfry.CodeInternal || failure.Status == nil || *failure.Status != http.StatusAccepted || output != (plain.ProbeEchoOutput{}) {
 				t.Fatalf("malformed success error=%v, output=%+v", err, output)
 			}
 		})
