@@ -20,7 +20,7 @@ func ConformanceAuthFixture(connection *database.Connection, mode, userID string
 		return err
 	case "conditional":
 		repo := db.AppAuthUsers
-		row, err := repo.UpdateIf(private.AppAuthUsersPrimaryKey{ID: userID}, repo.Columns().SessionVersion.Equal(int32(-1)), private.AppAuthUsersUpdate{SessionVersion: set(int32(1))})
+		row, err := repo.UpdateIf(private.AppAuthUsersPrimaryKey{ID: userID}, repo.Columns().SessionVersion.Eq(int32(-1)), private.AppAuthUsersUpdate{SessionVersion: set(int32(1))})
 		if err != nil {
 			return err
 		}

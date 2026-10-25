@@ -38,14 +38,43 @@ type Table struct {
 // Field provides typed predicates for one generated column.
 type Field[T any] struct{ Name string }
 
-func (field Field[T]) Equal(value T) Filter {
+// Eq matches equal values.
+func (field Field[T]) Eq(value T) Filter {
 	return Filter{column: field.Name, operator: "=", value: value}
 }
-func (field Field[T]) Greater(value T) Filter {
+
+// Ne matches unequal values.
+func (field Field[T]) Ne(value T) Filter {
+	return Filter{column: field.Name, operator: "<>", value: value}
+}
+
+// Gt matches values greater than value.
+func (field Field[T]) Gt(value T) Filter {
 	return Filter{column: field.Name, operator: ">", value: value}
 }
-func (field Field[T]) Less(value T) Filter {
+
+// Gte matches values greater than or equal to value.
+func (field Field[T]) Gte(value T) Filter {
+	return Filter{column: field.Name, operator: ">=", value: value}
+}
+
+// Lt matches values less than value.
+func (field Field[T]) Lt(value T) Filter {
 	return Filter{column: field.Name, operator: "<", value: value}
+}
+
+// Lte matches values less than or equal to value.
+func (field Field[T]) Lte(value T) Filter {
+	return Filter{column: field.Name, operator: "<=", value: value}
+}
+
+// IsIn matches any supplied value; an empty set matches no rows.
+func (field Field[T]) IsIn(values []T) Filter {
+	items := make([]any, len(values))
+	for index, value := range values {
+		items[index] = value
+	}
+	return Filter{column: field.Name, operator: "in", value: items}
 }
 func (field Field[T]) IsNull() Filter    { return Filter{column: field.Name, operator: "is null"} }
 func (field Field[T]) IsNotNull() Filter { return Filter{column: field.Name, operator: "is not null"} }
@@ -72,7 +101,7 @@ type Order struct {
 // FindMany defines typed filtering and pagination.
 type FindMany struct {
 	Where         Filter
-	Order         []Order
+	OrderBy       []Order
 	Limit, Offset *int32
 }
 
@@ -195,6 +224,16 @@ func (repository Repository) values(values map[string]any, insert bool) ([]strin
 
 // Insert returns the row inserted using validated, parameterized values.
 func (repository Repository) Insert(values map[string]any) (json.RawMessage, error) {
+	return repository.insert(values, false)
+}
+
+// Upsert inserts or updates on the complete primary key, changing only supplied
+// mutable columns and preserving defaults for omitted columns.
+func (repository Repository) Upsert(values map[string]any) (json.RawMessage, error) {
+	return repository.insert(values, true)
+}
+
+func (repository Repository) insert(values map[string]any, upsert bool) (json.RawMessage, error) {
 	table, err := quote(repository.Table.Name)
 	if err != nil {
 		return nil, err
@@ -210,6 +249,33 @@ func (repository Repository) Insert(values map[string]any) (json.RawMessage, err
 	sql := "insert into " + table + " default values"
 	if len(columns) > 0 {
 		sql = "insert into " + table + " (" + strings.Join(columns, ", ") + ") values (" + strings.Join(placeholders, ", ") + ")"
+	}
+	if upsert {
+		key := map[string]any{}
+		primary := []string{}
+		for _, name := range repository.Table.Primary {
+			if value, ok := values[name]; ok {
+				key[name] = value
+			}
+			quoted, err := quote(name)
+			if err != nil {
+				return nil, err
+			}
+			primary = append(primary, quoted)
+		}
+		if _, err := repository.key(key, new([]any)); err != nil {
+			return nil, err
+		}
+		sets := []string{}
+		for _, column := range columns {
+			if !slices.Contains(primary, column) {
+				sets = append(sets, column+" = excluded."+column)
+			}
+		}
+		if len(sets) == 0 {
+			return nil, errors.New("upsert requires mutable values")
+		}
+		sql += " on conflict (" + strings.Join(primary, ", ") + ") do update set " + strings.Join(sets, ", ")
 	}
 	rows, err := repository.Connection.Query(sql+" returning "+selection, params)
 	if err != nil {
@@ -311,7 +377,28 @@ func (repository Repository) filter(filter Filter, params *[]any, depth int) (st
 	if filter.operator == "is null" || filter.operator == "is not null" {
 		return name + " " + filter.operator, nil
 	}
-	if !slices.Contains([]string{"=", ">", "<"}, filter.operator) {
+	if filter.operator == "in" {
+		values, ok := filter.value.([]any)
+		if !ok {
+			return "", errors.New("invalid ORM membership")
+		}
+		if len(values) == 0 {
+			return "1 = 0", nil
+		}
+		placeholders := []string{}
+		for _, value := range values {
+			if value == nil {
+				return "", errors.New("use a null predicate")
+			}
+			if err := validate(column, value); err != nil {
+				return "", err
+			}
+			*params = append(*params, value)
+			placeholders = append(placeholders, fmt.Sprintf("$%d", len(*params)))
+		}
+		return name + " in (" + strings.Join(placeholders, ", ") + ")", nil
+	}
+	if !slices.Contains([]string{"=", "<>", ">", ">=", "<", "<="}, filter.operator) {
 		return "", errors.New("invalid ORM operator")
 	}
 	if filter.value == nil {
@@ -324,8 +411,8 @@ func (repository Repository) filter(filter Filter, params *[]any, depth int) (st
 	return fmt.Sprintf("%s %s $%d", name, filter.operator, len(*params)), nil
 }
 
-// Find returns the ordered rows matching typed predicates.
-func (repository Repository) Find(options FindMany) ([]json.RawMessage, error) {
+// FindMany returns the ordered rows matching typed predicates.
+func (repository Repository) FindMany(options FindMany) ([]json.RawMessage, error) {
 	table, err := quote(repository.Table.Name)
 	if err != nil {
 		return nil, err
@@ -344,7 +431,7 @@ func (repository Repository) Find(options FindMany) ([]json.RawMessage, error) {
 		sql += " where " + where
 	}
 	orders := []string{}
-	for _, order := range options.Order {
+	for _, order := range options.OrderBy {
 		if _, err := repository.column(order.column); err != nil {
 			return nil, err
 		}
@@ -377,31 +464,74 @@ func (repository Repository) Find(options FindMany) ([]json.RawMessage, error) {
 	return repository.Connection.Query(sql, params)
 }
 
-// Update changes mutable columns on exactly one primary-key-addressed row.
+// Update changes mutable columns on one primary-key-addressed row or returns not_found.
 func (repository Repository) Update(key, patch map[string]any) (json.RawMessage, error) {
-	return repository.update(key, Filter{}, patch, false)
+	return repository.update(key, Filter{}, patch, nil, false)
 }
 
 // UpdateIf returns nil when the addressed row no longer matches the condition.
 func (repository Repository) UpdateIf(key map[string]any, condition Filter, patch map[string]any) (json.RawMessage, error) {
-	return repository.update(key, condition, patch, true)
+	return repository.update(key, condition, patch, nil, true)
 }
 
-func (repository Repository) update(key map[string]any, condition Filter, patch map[string]any, conditional bool) (json.RawMessage, error) {
+// Increment atomically adds nonzero amounts to mutable integer columns or returns not_found.
+func (repository Repository) Increment(key map[string]any, amounts map[string]int32) (json.RawMessage, error) {
+	if len(amounts) == 0 {
+		return nil, errors.New("increment requires amounts")
+	}
+	return repository.update(key, Filter{}, nil, amounts, false)
+}
+
+// IncrementIf atomically increments and patches disjoint columns, returning nil
+// when the addressed row does not match the condition. Both maps must be nonempty.
+func (repository Repository) IncrementIf(key map[string]any, condition Filter, amounts map[string]int32, patch map[string]any) (json.RawMessage, error) {
+	if len(amounts) == 0 || len(patch) == 0 {
+		return nil, errors.New("conditional increment requires amounts and a patch")
+	}
+	return repository.update(key, condition, patch, amounts, true)
+}
+
+func (repository Repository) update(key map[string]any, condition Filter, patch map[string]any, amounts map[string]int32, conditional bool) (json.RawMessage, error) {
 	table, err := quote(repository.Table.Name)
 	if err != nil {
 		return nil, err
 	}
-	columns, placeholders, params, err := repository.values(patch, false)
-	if err != nil {
-		return nil, err
-	}
-	if len(columns) == 0 {
-		return nil, errors.New("empty ORM update")
-	}
 	sets := []string{}
-	for index, column := range columns {
-		sets = append(sets, column+" = "+placeholders[index])
+	params := []any{}
+	for name, amount := range amounts {
+		column, err := repository.column(name)
+		if err != nil {
+			return nil, err
+		}
+		if column.Primary || column.Kind != "integer" || amount == 0 {
+			return nil, errors.New("increments require mutable integer columns and nonzero amounts")
+		}
+		if _, ok := patch[name]; ok {
+			return nil, errors.New("column cannot be incremented and set together")
+		}
+	}
+	for _, column := range repository.Table.Columns {
+		if amount, ok := amounts[column.Name]; ok {
+			name, err := quote(column.Name)
+			if err != nil {
+				return nil, err
+			}
+			params = append(params, amount)
+			sets = append(sets, fmt.Sprintf("%s = %s + $%d", name, name, len(params)))
+		}
+	}
+	if patch != nil {
+		columns, _, values, err := repository.values(patch, false)
+		if err != nil {
+			return nil, err
+		}
+		for index, column := range columns {
+			params = append(params, values[index])
+			sets = append(sets, fmt.Sprintf("%s = $%d", column, len(params)))
+		}
+	}
+	if len(sets) == 0 {
+		return nil, errors.New("empty ORM update")
 	}
 	where, err := repository.key(key, &params)
 	if err != nil {
@@ -422,8 +552,11 @@ func (repository Repository) update(key map[string]any, condition Filter, patch 
 	if err != nil {
 		return nil, err
 	}
-	if conditional && len(rows) == 0 {
-		return nil, nil
+	if len(rows) == 0 {
+		if conditional {
+			return nil, nil
+		}
+		return nil, &host.Error{Code: "not_found"}
 	}
 	if len(rows) != 1 {
 		return nil, errors.New("update did not return one row")
@@ -431,25 +564,32 @@ func (repository Repository) update(key map[string]any, condition Filter, patch 
 	return rows[0], nil
 }
 
-// Delete removes at most one primary-key-addressed row.
-func (repository Repository) Delete(key map[string]any) (bool, error) {
+// Delete returns the deleted row, or nil when the complete primary key has no row.
+func (repository Repository) Delete(key map[string]any) (json.RawMessage, error) {
 	table, err := quote(repository.Table.Name)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
 	params := []any{}
 	where, err := repository.key(key, &params)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
-	rows, err := repository.Connection.Query("delete from "+table+" where "+where+" returning 1 as deleted", params)
+	selection, err := repository.selection()
 	if err != nil {
-		return false, err
+		return nil, err
+	}
+	rows, err := repository.Connection.Query("delete from "+table+" where "+where+" returning "+selection, params)
+	if err != nil {
+		return nil, err
 	}
 	if len(rows) > 1 {
-		return false, errors.New("delete returned multiple rows")
+		return nil, errors.New("delete returned multiple rows")
 	}
-	return len(rows) == 1, nil
+	if len(rows) == 0 {
+		return nil, nil
+	}
+	return rows[0], nil
 }
 
 // DecodeRow rejects missing or null required columns before publishing a typed row.

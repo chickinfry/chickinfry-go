@@ -26,7 +26,7 @@ func cleanupSessionFilter(fields private.AppAuthSessionsColumns, checked time.Ti
 	// Legacy access expiry only bounds selection; the locked check still uses Q1.
 	idle := timestamp(checked.Add(-time.Duration(policy.idleTimeoutSeconds) * time.Second))
 	atOrBefore := func(field orm.Field[string], cutoff string) orm.Filter {
-		return orm.Or(field.Less(cutoff), field.Equal(cutoff))
+		return orm.Or(field.Lt(cutoff), field.Eq(cutoff))
 	}
 	ended := orm.Or(fields.RevokedAt.IsNotNull(),
 		orm.And(fields.LastRenewedAt.IsNotNull(), atOrBefore(fields.LastRenewedAt, idle)),
@@ -63,16 +63,16 @@ func (auth *Auth) cleanup(cutoff string) (err error) {
 		return err
 	}
 	rows, err := sessions.FindMany(orm.FindMany{
-		Where: orm.And(ended, orm.Not(sf.ID.Less(start))),
-		Order: []orm.Order{sf.ID.Asc()}, Limit: limit,
+		Where:   orm.And(ended, orm.Not(sf.ID.Lt(start))),
+		OrderBy: []orm.Order{sf.ID.Asc()}, Limit: limit,
 	})
 	if err != nil {
 		return err
 	}
 	if len(rows) < int(*limit) {
 		front, err := sessions.FindMany(orm.FindMany{
-			Where: orm.And(ended, sf.ID.Less(start)),
-			Order: []orm.Order{sf.ID.Asc()}, Limit: new(*limit - int32(len(rows))),
+			Where:   orm.And(ended, sf.ID.Lt(start)),
+			OrderBy: []orm.Order{sf.ID.Asc()}, Limit: new(*limit - int32(len(rows))),
 		})
 		if err != nil {
 			return err
@@ -83,7 +83,7 @@ func (auth *Auth) cleanup(cutoff string) (err error) {
 	for _, candidate := range rows {
 		err := auth.db.Transaction(func(db *private.Database) error {
 			sessions := db.AppAuthSessions
-			session, err := sessions.UpdateIf(private.AppAuthSessionsPrimaryKey{ID: candidate.ID}, orm.And(sf.ExpiresAt.Equal(candidate.ExpiresAt), ended), private.AppAuthSessionsUpdate{ExpiresAt: set(candidate.ExpiresAt)})
+			session, err := sessions.UpdateIf(private.AppAuthSessionsPrimaryKey{ID: candidate.ID}, orm.And(sf.ExpiresAt.Eq(candidate.ExpiresAt), ended), private.AppAuthSessionsUpdate{ExpiresAt: set(candidate.ExpiresAt)})
 			if err != nil {
 				return err
 			}
@@ -103,12 +103,12 @@ func (auth *Auth) cleanup(cutoff string) (err error) {
 			}
 			refresh := db.AppAuthRefreshTokens
 			rf := refresh.Columns()
-			children, err := refresh.FindMany(orm.FindMany{Where: rf.SessionID.Equal(session.ID), Order: []orm.Order{rf.ExpiresAt.Asc(), rf.ID.Asc()}, Limit: new(remainingRefresh)})
+			children, err := refresh.FindMany(orm.FindMany{Where: rf.SessionID.Eq(session.ID), OrderBy: []orm.Order{rf.ExpiresAt.Asc(), rf.ID.Asc()}, Limit: new(remainingRefresh)})
 			if err != nil {
 				return err
 			}
 			for _, child := range children {
-				row, err := refresh.UpdateIf(private.AppAuthRefreshTokensPrimaryKey{ID: child.ID}, orm.And(rf.SessionID.Equal(session.ID), rf.ExpiresAt.Equal(child.ExpiresAt)), private.AppAuthRefreshTokensUpdate{ExpiresAt: set(child.ExpiresAt)})
+				row, err := refresh.UpdateIf(private.AppAuthRefreshTokensPrimaryKey{ID: child.ID}, orm.And(rf.SessionID.Eq(session.ID), rf.ExpiresAt.Eq(child.ExpiresAt)), private.AppAuthRefreshTokensUpdate{ExpiresAt: set(child.ExpiresAt)})
 				if err != nil {
 					return err
 				}
@@ -121,7 +121,7 @@ func (auth *Auth) cleanup(cutoff string) (err error) {
 					return err
 				}
 			}
-			refs, err := refresh.FindMany(orm.FindMany{Where: rf.SessionID.Equal(session.ID), Limit: new(int32(1))})
+			refs, err := refresh.FindMany(orm.FindMany{Where: rf.SessionID.Eq(session.ID), Limit: new(int32(1))})
 			if err != nil || len(refs) > 0 {
 				return err
 			}
@@ -135,15 +135,15 @@ func (auth *Auth) cleanup(cutoff string) (err error) {
 	}
 	rates := auth.db.AppAuthRateLimits
 	lf := rates.Columns()
-	expiredRate := orm.Or(lf.ExpiresAt.Less(cutoff), lf.ExpiresAt.Equal(cutoff))
-	rateRows, err := rates.FindMany(orm.FindMany{Where: expiredRate, Order: []orm.Order{lf.ExpiresAt.Asc(), lf.Action.Asc(), lf.KeyHash.Asc()}, Limit: limit})
+	expiredRate := orm.Or(lf.ExpiresAt.Lt(cutoff), lf.ExpiresAt.Eq(cutoff))
+	rateRows, err := rates.FindMany(orm.FindMany{Where: expiredRate, OrderBy: []orm.Order{lf.ExpiresAt.Asc(), lf.Action.Asc(), lf.KeyHash.Asc()}, Limit: limit})
 	if err != nil {
 		return err
 	}
 	for _, candidate := range rateRows {
 		err := auth.db.Transaction(func(db *private.Database) error {
 			key := private.AppAuthRateLimitsPrimaryKey{Action: candidate.Action, KeyHash: candidate.KeyHash}
-			row, err := db.AppAuthRateLimits.UpdateIf(key, orm.And(lf.ExpiresAt.Equal(candidate.ExpiresAt), lf.AttemptCount.Equal(candidate.AttemptCount), expiredRate), private.AppAuthRateLimitsUpdate{AttemptCount: set(candidate.AttemptCount)})
+			row, err := db.AppAuthRateLimits.UpdateIf(key, orm.And(lf.ExpiresAt.Eq(candidate.ExpiresAt), lf.AttemptCount.Eq(candidate.AttemptCount), expiredRate), private.AppAuthRateLimitsUpdate{AttemptCount: set(candidate.AttemptCount)})
 			if err != nil || row == nil {
 				return err
 			}

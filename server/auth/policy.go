@@ -52,7 +52,7 @@ func expiredAt(checked time.Time, value string) (bool, error) {
 func latestRefresh(db *private.Database, sessionID string) (*private.AppAuthRefreshTokensRow, error) {
 	repo := db.AppAuthRefreshTokens
 	fields := repo.Columns()
-	rows, err := repo.FindMany(orm.FindMany{Where: fields.SessionID.Equal(sessionID), Order: []orm.Order{fields.CreatedAt.Desc(), fields.ID.Desc()}, Limit: new(int32(1))})
+	rows, err := repo.FindMany(orm.FindMany{Where: fields.SessionID.Eq(sessionID), OrderBy: []orm.Order{fields.CreatedAt.Desc(), fields.ID.Desc()}, Limit: new(int32(1))})
 	if err != nil || len(rows) == 0 {
 		return nil, err
 	}

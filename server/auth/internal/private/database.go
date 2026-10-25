@@ -3,6 +3,8 @@
 package private
 
 import (
+	"errors"
+
 	"github.com/chickinfry/chickinfry-go/server/database"
 	"github.com/chickinfry/chickinfry-go/server/orm"
 )
@@ -72,6 +74,18 @@ type AppAuthActionTokensInsert struct {
 	UserID     string
 }
 
+// AppAuthActionTokensUpsert requires every primary key, including keys with defaults.
+type AppAuthActionTokensUpsert struct {
+	Attempts   orm.Optional[int32]
+	ConsumedAt orm.Optional[string]
+	CreatedAt  orm.Optional[string]
+	ExpiresAt  string
+	ID         string
+	Kind       string
+	TokenHash  string
+	UserID     string
+}
+
 type AppAuthActionTokensUpdate struct {
 	Attempts   orm.Optional[int32]
 	ConsumedAt orm.Optional[string]
@@ -80,6 +94,11 @@ type AppAuthActionTokensUpdate struct {
 	Kind       orm.Optional[string]
 	TokenHash  orm.Optional[string]
 	UserID     orm.Optional[string]
+}
+
+// AppAuthActionTokensIncrement selects mutable integer columns and their nonzero amounts.
+type AppAuthActionTokensIncrement struct {
+	Attempts orm.Optional[int32]
 }
 
 type AppAuthActionTokensPrimaryKey struct {
@@ -153,6 +172,42 @@ func (repository AppAuthActionTokensRepository) Insert(input AppAuthActionTokens
 	return orm.DecodeRow[AppAuthActionTokensRow](row, appAuthActionTokensTable)
 }
 
+// Upsert inserts or updates supplied mutable columns on the complete primary key.
+func (repository AppAuthActionTokensRepository) Upsert(input AppAuthActionTokensUpsert) (AppAuthActionTokensRow, error) {
+	values := map[string]any{}
+	if input.Attempts.Set {
+		if input.Attempts.Null {
+			values["attempts"] = nil
+		} else {
+			values["attempts"] = input.Attempts.Value
+		}
+	}
+	if input.ConsumedAt.Set {
+		if input.ConsumedAt.Null {
+			values["consumed_at"] = nil
+		} else {
+			values["consumed_at"] = input.ConsumedAt.Value
+		}
+	}
+	if input.CreatedAt.Set {
+		if input.CreatedAt.Null {
+			values["created_at"] = nil
+		} else {
+			values["created_at"] = input.CreatedAt.Value
+		}
+	}
+	values["expires_at"] = input.ExpiresAt
+	values["id"] = input.ID
+	values["kind"] = input.Kind
+	values["token_hash"] = input.TokenHash
+	values["user_id"] = input.UserID
+	row, err := repository.repository.Upsert(values)
+	if err != nil {
+		return AppAuthActionTokensRow{}, err
+	}
+	return orm.DecodeRow[AppAuthActionTokensRow](row, appAuthActionTokensTable)
+}
+
 func (repository AppAuthActionTokensRepository) FindByID(key AppAuthActionTokensPrimaryKey) (*AppAuthActionTokensRow, error) {
 	row, err := repository.repository.FindByID(map[string]any{"id": key.ID})
 	if err != nil || row == nil {
@@ -166,7 +221,7 @@ func (repository AppAuthActionTokensRepository) FindByID(key AppAuthActionTokens
 }
 
 func (repository AppAuthActionTokensRepository) FindMany(options orm.FindMany) ([]AppAuthActionTokensRow, error) {
-	rows, err := repository.repository.Find(options)
+	rows, err := repository.repository.FindMany(options)
 	if err != nil {
 		return nil, err
 	}
@@ -301,8 +356,103 @@ func (repository AppAuthActionTokensRepository) UpdateIf(key AppAuthActionTokens
 	return &value, nil
 }
 
-func (repository AppAuthActionTokensRepository) Delete(key AppAuthActionTokensPrimaryKey) (bool, error) {
-	return repository.repository.Delete(map[string]any{"id": key.ID})
+// Increment atomically adds amounts or returns not_found for a missing row.
+func (repository AppAuthActionTokensRepository) Increment(key AppAuthActionTokensPrimaryKey, amounts AppAuthActionTokensIncrement) (AppAuthActionTokensRow, error) {
+	values := map[string]int32{}
+	if amounts.Attempts.Set {
+		if amounts.Attempts.Null {
+			return AppAuthActionTokensRow{}, errors.New("increment cannot be null")
+		}
+		values["attempts"] = amounts.Attempts.Value
+	}
+	row, err := repository.repository.Increment(map[string]any{"id": key.ID}, values)
+	if err != nil {
+		return AppAuthActionTokensRow{}, err
+	}
+	return orm.DecodeRow[AppAuthActionTokensRow](row, appAuthActionTokensTable)
+}
+
+// IncrementIf atomically increments and patches disjoint columns, or returns nil when unmatched.
+func (repository AppAuthActionTokensRepository) IncrementIf(key AppAuthActionTokensPrimaryKey, condition orm.Filter, amounts AppAuthActionTokensIncrement, patch AppAuthActionTokensUpdate) (*AppAuthActionTokensRow, error) {
+	increments := map[string]int32{}
+	if amounts.Attempts.Set {
+		if amounts.Attempts.Null {
+			return nil, errors.New("increment cannot be null")
+		}
+		increments["attempts"] = amounts.Attempts.Value
+	}
+	values := map[string]any{}
+	if patch.Attempts.Set {
+		if patch.Attempts.Null {
+			values["attempts"] = nil
+		} else {
+			values["attempts"] = patch.Attempts.Value
+		}
+	}
+	if patch.ConsumedAt.Set {
+		if patch.ConsumedAt.Null {
+			values["consumed_at"] = nil
+		} else {
+			values["consumed_at"] = patch.ConsumedAt.Value
+		}
+	}
+	if patch.CreatedAt.Set {
+		if patch.CreatedAt.Null {
+			values["created_at"] = nil
+		} else {
+			values["created_at"] = patch.CreatedAt.Value
+		}
+	}
+	if patch.ExpiresAt.Set {
+		if patch.ExpiresAt.Null {
+			values["expires_at"] = nil
+		} else {
+			values["expires_at"] = patch.ExpiresAt.Value
+		}
+	}
+	if patch.Kind.Set {
+		if patch.Kind.Null {
+			values["kind"] = nil
+		} else {
+			values["kind"] = patch.Kind.Value
+		}
+	}
+	if patch.TokenHash.Set {
+		if patch.TokenHash.Null {
+			values["token_hash"] = nil
+		} else {
+			values["token_hash"] = patch.TokenHash.Value
+		}
+	}
+	if patch.UserID.Set {
+		if patch.UserID.Null {
+			values["user_id"] = nil
+		} else {
+			values["user_id"] = patch.UserID.Value
+		}
+	}
+	row, err := repository.repository.IncrementIf(map[string]any{"id": key.ID}, condition, increments, values)
+	if err != nil || row == nil {
+		return nil, err
+	}
+	value, err := orm.DecodeRow[AppAuthActionTokensRow](row, appAuthActionTokensTable)
+	if err != nil {
+		return nil, err
+	}
+	return &value, nil
+}
+
+// Delete returns the deleted row, or nil when no row matches the complete primary key.
+func (repository AppAuthActionTokensRepository) Delete(key AppAuthActionTokensPrimaryKey) (*AppAuthActionTokensRow, error) {
+	row, err := repository.repository.Delete(map[string]any{"id": key.ID})
+	if err != nil || row == nil {
+		return nil, err
+	}
+	value, err := orm.DecodeRow[AppAuthActionTokensRow](row, appAuthActionTokensTable)
+	if err != nil {
+		return nil, err
+	}
+	return &value, nil
 }
 
 var appAuthIdentitiesTable = orm.Table{Name: "app_auth_identities", Primary: []string{"provider", "subject"}, Columns: []orm.Column{
@@ -326,9 +476,21 @@ type AppAuthIdentitiesInsert struct {
 	UserID    string
 }
 
+// AppAuthIdentitiesUpsert requires every primary key, including keys with defaults.
+type AppAuthIdentitiesUpsert struct {
+	CreatedAt orm.Optional[string]
+	Provider  string
+	Subject   string
+	UserID    string
+}
+
 type AppAuthIdentitiesUpdate struct {
 	CreatedAt orm.Optional[string]
 	UserID    orm.Optional[string]
+}
+
+// AppAuthIdentitiesIncrement selects mutable integer columns and their nonzero amounts.
+type AppAuthIdentitiesIncrement struct {
 }
 
 type AppAuthIdentitiesPrimaryKey struct {
@@ -373,6 +535,26 @@ func (repository AppAuthIdentitiesRepository) Insert(input AppAuthIdentitiesInse
 	return orm.DecodeRow[AppAuthIdentitiesRow](row, appAuthIdentitiesTable)
 }
 
+// Upsert inserts or updates supplied mutable columns on the complete primary key.
+func (repository AppAuthIdentitiesRepository) Upsert(input AppAuthIdentitiesUpsert) (AppAuthIdentitiesRow, error) {
+	values := map[string]any{}
+	if input.CreatedAt.Set {
+		if input.CreatedAt.Null {
+			values["created_at"] = nil
+		} else {
+			values["created_at"] = input.CreatedAt.Value
+		}
+	}
+	values["provider"] = input.Provider
+	values["subject"] = input.Subject
+	values["user_id"] = input.UserID
+	row, err := repository.repository.Upsert(values)
+	if err != nil {
+		return AppAuthIdentitiesRow{}, err
+	}
+	return orm.DecodeRow[AppAuthIdentitiesRow](row, appAuthIdentitiesTable)
+}
+
 func (repository AppAuthIdentitiesRepository) FindByID(key AppAuthIdentitiesPrimaryKey) (*AppAuthIdentitiesRow, error) {
 	row, err := repository.repository.FindByID(map[string]any{"provider": key.Provider, "subject": key.Subject})
 	if err != nil || row == nil {
@@ -386,7 +568,7 @@ func (repository AppAuthIdentitiesRepository) FindByID(key AppAuthIdentitiesPrim
 }
 
 func (repository AppAuthIdentitiesRepository) FindMany(options orm.FindMany) ([]AppAuthIdentitiesRow, error) {
-	rows, err := repository.repository.Find(options)
+	rows, err := repository.repository.FindMany(options)
 	if err != nil {
 		return nil, err
 	}
@@ -451,8 +633,56 @@ func (repository AppAuthIdentitiesRepository) UpdateIf(key AppAuthIdentitiesPrim
 	return &value, nil
 }
 
-func (repository AppAuthIdentitiesRepository) Delete(key AppAuthIdentitiesPrimaryKey) (bool, error) {
-	return repository.repository.Delete(map[string]any{"provider": key.Provider, "subject": key.Subject})
+// Increment atomically adds amounts or returns not_found for a missing row.
+func (repository AppAuthIdentitiesRepository) Increment(key AppAuthIdentitiesPrimaryKey, amounts AppAuthIdentitiesIncrement) (AppAuthIdentitiesRow, error) {
+	values := map[string]int32{}
+	row, err := repository.repository.Increment(map[string]any{"provider": key.Provider, "subject": key.Subject}, values)
+	if err != nil {
+		return AppAuthIdentitiesRow{}, err
+	}
+	return orm.DecodeRow[AppAuthIdentitiesRow](row, appAuthIdentitiesTable)
+}
+
+// IncrementIf atomically increments and patches disjoint columns, or returns nil when unmatched.
+func (repository AppAuthIdentitiesRepository) IncrementIf(key AppAuthIdentitiesPrimaryKey, condition orm.Filter, amounts AppAuthIdentitiesIncrement, patch AppAuthIdentitiesUpdate) (*AppAuthIdentitiesRow, error) {
+	increments := map[string]int32{}
+	values := map[string]any{}
+	if patch.CreatedAt.Set {
+		if patch.CreatedAt.Null {
+			values["created_at"] = nil
+		} else {
+			values["created_at"] = patch.CreatedAt.Value
+		}
+	}
+	if patch.UserID.Set {
+		if patch.UserID.Null {
+			values["user_id"] = nil
+		} else {
+			values["user_id"] = patch.UserID.Value
+		}
+	}
+	row, err := repository.repository.IncrementIf(map[string]any{"provider": key.Provider, "subject": key.Subject}, condition, increments, values)
+	if err != nil || row == nil {
+		return nil, err
+	}
+	value, err := orm.DecodeRow[AppAuthIdentitiesRow](row, appAuthIdentitiesTable)
+	if err != nil {
+		return nil, err
+	}
+	return &value, nil
+}
+
+// Delete returns the deleted row, or nil when no row matches the complete primary key.
+func (repository AppAuthIdentitiesRepository) Delete(key AppAuthIdentitiesPrimaryKey) (*AppAuthIdentitiesRow, error) {
+	row, err := repository.repository.Delete(map[string]any{"provider": key.Provider, "subject": key.Subject})
+	if err != nil || row == nil {
+		return nil, err
+	}
+	value, err := orm.DecodeRow[AppAuthIdentitiesRow](row, appAuthIdentitiesTable)
+	if err != nil {
+		return nil, err
+	}
+	return &value, nil
 }
 
 var appAuthInvitesTable = orm.Table{Name: "app_auth_invites", Primary: []string{"id"}, Columns: []orm.Column{
@@ -491,6 +721,19 @@ type AppAuthInvitesInsert struct {
 	RevokedAt  orm.Optional[string]
 }
 
+// AppAuthInvitesUpsert requires every primary key, including keys with defaults.
+type AppAuthInvitesUpsert struct {
+	CodeHash   string
+	CreatedAt  orm.Optional[string]
+	Email      string
+	ExpiresAt  string
+	ID         string
+	IssuedBy   string
+	RedeemedAt orm.Optional[string]
+	RedeemedBy orm.Optional[string]
+	RevokedAt  orm.Optional[string]
+}
+
 type AppAuthInvitesUpdate struct {
 	CodeHash   orm.Optional[string]
 	CreatedAt  orm.Optional[string]
@@ -500,6 +743,10 @@ type AppAuthInvitesUpdate struct {
 	RedeemedAt orm.Optional[string]
 	RedeemedBy orm.Optional[string]
 	RevokedAt  orm.Optional[string]
+}
+
+// AppAuthInvitesIncrement selects mutable integer columns and their nonzero amounts.
+type AppAuthInvitesIncrement struct {
 }
 
 type AppAuthInvitesPrimaryKey struct {
@@ -582,6 +829,49 @@ func (repository AppAuthInvitesRepository) Insert(input AppAuthInvitesInsert) (A
 	return orm.DecodeRow[AppAuthInvitesRow](row, appAuthInvitesTable)
 }
 
+// Upsert inserts or updates supplied mutable columns on the complete primary key.
+func (repository AppAuthInvitesRepository) Upsert(input AppAuthInvitesUpsert) (AppAuthInvitesRow, error) {
+	values := map[string]any{}
+	values["code_hash"] = input.CodeHash
+	if input.CreatedAt.Set {
+		if input.CreatedAt.Null {
+			values["created_at"] = nil
+		} else {
+			values["created_at"] = input.CreatedAt.Value
+		}
+	}
+	values["email"] = input.Email
+	values["expires_at"] = input.ExpiresAt
+	values["id"] = input.ID
+	values["issued_by"] = input.IssuedBy
+	if input.RedeemedAt.Set {
+		if input.RedeemedAt.Null {
+			values["redeemed_at"] = nil
+		} else {
+			values["redeemed_at"] = input.RedeemedAt.Value
+		}
+	}
+	if input.RedeemedBy.Set {
+		if input.RedeemedBy.Null {
+			values["redeemed_by"] = nil
+		} else {
+			values["redeemed_by"] = input.RedeemedBy.Value
+		}
+	}
+	if input.RevokedAt.Set {
+		if input.RevokedAt.Null {
+			values["revoked_at"] = nil
+		} else {
+			values["revoked_at"] = input.RevokedAt.Value
+		}
+	}
+	row, err := repository.repository.Upsert(values)
+	if err != nil {
+		return AppAuthInvitesRow{}, err
+	}
+	return orm.DecodeRow[AppAuthInvitesRow](row, appAuthInvitesTable)
+}
+
 func (repository AppAuthInvitesRepository) FindByID(key AppAuthInvitesPrimaryKey) (*AppAuthInvitesRow, error) {
 	row, err := repository.repository.FindByID(map[string]any{"id": key.ID})
 	if err != nil || row == nil {
@@ -595,7 +885,7 @@ func (repository AppAuthInvitesRepository) FindByID(key AppAuthInvitesPrimaryKey
 }
 
 func (repository AppAuthInvitesRepository) FindMany(options orm.FindMany) ([]AppAuthInvitesRow, error) {
-	rows, err := repository.repository.Find(options)
+	rows, err := repository.repository.FindMany(options)
 	if err != nil {
 		return nil, err
 	}
@@ -744,8 +1034,98 @@ func (repository AppAuthInvitesRepository) UpdateIf(key AppAuthInvitesPrimaryKey
 	return &value, nil
 }
 
-func (repository AppAuthInvitesRepository) Delete(key AppAuthInvitesPrimaryKey) (bool, error) {
-	return repository.repository.Delete(map[string]any{"id": key.ID})
+// Increment atomically adds amounts or returns not_found for a missing row.
+func (repository AppAuthInvitesRepository) Increment(key AppAuthInvitesPrimaryKey, amounts AppAuthInvitesIncrement) (AppAuthInvitesRow, error) {
+	values := map[string]int32{}
+	row, err := repository.repository.Increment(map[string]any{"id": key.ID}, values)
+	if err != nil {
+		return AppAuthInvitesRow{}, err
+	}
+	return orm.DecodeRow[AppAuthInvitesRow](row, appAuthInvitesTable)
+}
+
+// IncrementIf atomically increments and patches disjoint columns, or returns nil when unmatched.
+func (repository AppAuthInvitesRepository) IncrementIf(key AppAuthInvitesPrimaryKey, condition orm.Filter, amounts AppAuthInvitesIncrement, patch AppAuthInvitesUpdate) (*AppAuthInvitesRow, error) {
+	increments := map[string]int32{}
+	values := map[string]any{}
+	if patch.CodeHash.Set {
+		if patch.CodeHash.Null {
+			values["code_hash"] = nil
+		} else {
+			values["code_hash"] = patch.CodeHash.Value
+		}
+	}
+	if patch.CreatedAt.Set {
+		if patch.CreatedAt.Null {
+			values["created_at"] = nil
+		} else {
+			values["created_at"] = patch.CreatedAt.Value
+		}
+	}
+	if patch.Email.Set {
+		if patch.Email.Null {
+			values["email"] = nil
+		} else {
+			values["email"] = patch.Email.Value
+		}
+	}
+	if patch.ExpiresAt.Set {
+		if patch.ExpiresAt.Null {
+			values["expires_at"] = nil
+		} else {
+			values["expires_at"] = patch.ExpiresAt.Value
+		}
+	}
+	if patch.IssuedBy.Set {
+		if patch.IssuedBy.Null {
+			values["issued_by"] = nil
+		} else {
+			values["issued_by"] = patch.IssuedBy.Value
+		}
+	}
+	if patch.RedeemedAt.Set {
+		if patch.RedeemedAt.Null {
+			values["redeemed_at"] = nil
+		} else {
+			values["redeemed_at"] = patch.RedeemedAt.Value
+		}
+	}
+	if patch.RedeemedBy.Set {
+		if patch.RedeemedBy.Null {
+			values["redeemed_by"] = nil
+		} else {
+			values["redeemed_by"] = patch.RedeemedBy.Value
+		}
+	}
+	if patch.RevokedAt.Set {
+		if patch.RevokedAt.Null {
+			values["revoked_at"] = nil
+		} else {
+			values["revoked_at"] = patch.RevokedAt.Value
+		}
+	}
+	row, err := repository.repository.IncrementIf(map[string]any{"id": key.ID}, condition, increments, values)
+	if err != nil || row == nil {
+		return nil, err
+	}
+	value, err := orm.DecodeRow[AppAuthInvitesRow](row, appAuthInvitesTable)
+	if err != nil {
+		return nil, err
+	}
+	return &value, nil
+}
+
+// Delete returns the deleted row, or nil when no row matches the complete primary key.
+func (repository AppAuthInvitesRepository) Delete(key AppAuthInvitesPrimaryKey) (*AppAuthInvitesRow, error) {
+	row, err := repository.repository.Delete(map[string]any{"id": key.ID})
+	if err != nil || row == nil {
+		return nil, err
+	}
+	value, err := orm.DecodeRow[AppAuthInvitesRow](row, appAuthInvitesTable)
+	if err != nil {
+		return nil, err
+	}
+	return &value, nil
 }
 
 var appAuthMigrationsTable = orm.Table{Name: "app_auth_migrations", Primary: []string{"feature", "version"}, Columns: []orm.Column{
@@ -775,11 +1155,25 @@ type AppAuthMigrationsInsert struct {
 	Version   int32
 }
 
+// AppAuthMigrationsUpsert requires every primary key, including keys with defaults.
+type AppAuthMigrationsUpsert struct {
+	AppliedAt orm.Optional[string]
+	Digest    string
+	Feature   string
+	Name      string
+	Phase     string
+	Version   int32
+}
+
 type AppAuthMigrationsUpdate struct {
 	AppliedAt orm.Optional[string]
 	Digest    orm.Optional[string]
 	Name      orm.Optional[string]
 	Phase     orm.Optional[string]
+}
+
+// AppAuthMigrationsIncrement selects mutable integer columns and their nonzero amounts.
+type AppAuthMigrationsIncrement struct {
 }
 
 type AppAuthMigrationsPrimaryKey struct {
@@ -830,6 +1224,28 @@ func (repository AppAuthMigrationsRepository) Insert(input AppAuthMigrationsInse
 	return orm.DecodeRow[AppAuthMigrationsRow](row, appAuthMigrationsTable)
 }
 
+// Upsert inserts or updates supplied mutable columns on the complete primary key.
+func (repository AppAuthMigrationsRepository) Upsert(input AppAuthMigrationsUpsert) (AppAuthMigrationsRow, error) {
+	values := map[string]any{}
+	if input.AppliedAt.Set {
+		if input.AppliedAt.Null {
+			values["applied_at"] = nil
+		} else {
+			values["applied_at"] = input.AppliedAt.Value
+		}
+	}
+	values["digest"] = input.Digest
+	values["feature"] = input.Feature
+	values["name"] = input.Name
+	values["phase"] = input.Phase
+	values["version"] = input.Version
+	row, err := repository.repository.Upsert(values)
+	if err != nil {
+		return AppAuthMigrationsRow{}, err
+	}
+	return orm.DecodeRow[AppAuthMigrationsRow](row, appAuthMigrationsTable)
+}
+
 func (repository AppAuthMigrationsRepository) FindByID(key AppAuthMigrationsPrimaryKey) (*AppAuthMigrationsRow, error) {
 	row, err := repository.repository.FindByID(map[string]any{"feature": key.Feature, "version": key.Version})
 	if err != nil || row == nil {
@@ -843,7 +1259,7 @@ func (repository AppAuthMigrationsRepository) FindByID(key AppAuthMigrationsPrim
 }
 
 func (repository AppAuthMigrationsRepository) FindMany(options orm.FindMany) ([]AppAuthMigrationsRow, error) {
-	rows, err := repository.repository.Find(options)
+	rows, err := repository.repository.FindMany(options)
 	if err != nil {
 		return nil, err
 	}
@@ -936,8 +1352,70 @@ func (repository AppAuthMigrationsRepository) UpdateIf(key AppAuthMigrationsPrim
 	return &value, nil
 }
 
-func (repository AppAuthMigrationsRepository) Delete(key AppAuthMigrationsPrimaryKey) (bool, error) {
-	return repository.repository.Delete(map[string]any{"feature": key.Feature, "version": key.Version})
+// Increment atomically adds amounts or returns not_found for a missing row.
+func (repository AppAuthMigrationsRepository) Increment(key AppAuthMigrationsPrimaryKey, amounts AppAuthMigrationsIncrement) (AppAuthMigrationsRow, error) {
+	values := map[string]int32{}
+	row, err := repository.repository.Increment(map[string]any{"feature": key.Feature, "version": key.Version}, values)
+	if err != nil {
+		return AppAuthMigrationsRow{}, err
+	}
+	return orm.DecodeRow[AppAuthMigrationsRow](row, appAuthMigrationsTable)
+}
+
+// IncrementIf atomically increments and patches disjoint columns, or returns nil when unmatched.
+func (repository AppAuthMigrationsRepository) IncrementIf(key AppAuthMigrationsPrimaryKey, condition orm.Filter, amounts AppAuthMigrationsIncrement, patch AppAuthMigrationsUpdate) (*AppAuthMigrationsRow, error) {
+	increments := map[string]int32{}
+	values := map[string]any{}
+	if patch.AppliedAt.Set {
+		if patch.AppliedAt.Null {
+			values["applied_at"] = nil
+		} else {
+			values["applied_at"] = patch.AppliedAt.Value
+		}
+	}
+	if patch.Digest.Set {
+		if patch.Digest.Null {
+			values["digest"] = nil
+		} else {
+			values["digest"] = patch.Digest.Value
+		}
+	}
+	if patch.Name.Set {
+		if patch.Name.Null {
+			values["name"] = nil
+		} else {
+			values["name"] = patch.Name.Value
+		}
+	}
+	if patch.Phase.Set {
+		if patch.Phase.Null {
+			values["phase"] = nil
+		} else {
+			values["phase"] = patch.Phase.Value
+		}
+	}
+	row, err := repository.repository.IncrementIf(map[string]any{"feature": key.Feature, "version": key.Version}, condition, increments, values)
+	if err != nil || row == nil {
+		return nil, err
+	}
+	value, err := orm.DecodeRow[AppAuthMigrationsRow](row, appAuthMigrationsTable)
+	if err != nil {
+		return nil, err
+	}
+	return &value, nil
+}
+
+// Delete returns the deleted row, or nil when no row matches the complete primary key.
+func (repository AppAuthMigrationsRepository) Delete(key AppAuthMigrationsPrimaryKey) (*AppAuthMigrationsRow, error) {
+	row, err := repository.repository.Delete(map[string]any{"feature": key.Feature, "version": key.Version})
+	if err != nil || row == nil {
+		return nil, err
+	}
+	value, err := orm.DecodeRow[AppAuthMigrationsRow](row, appAuthMigrationsTable)
+	if err != nil {
+		return nil, err
+	}
+	return &value, nil
 }
 
 var appAuthRateLimitsTable = orm.Table{Name: "app_auth_rate_limits", Primary: []string{"action", "key_hash"}, Columns: []orm.Column{
@@ -961,9 +1439,22 @@ type AppAuthRateLimitsInsert struct {
 	KeyHash      string
 }
 
+// AppAuthRateLimitsUpsert requires every primary key, including keys with defaults.
+type AppAuthRateLimitsUpsert struct {
+	Action       string
+	AttemptCount int32
+	ExpiresAt    string
+	KeyHash      string
+}
+
 type AppAuthRateLimitsUpdate struct {
 	AttemptCount orm.Optional[int32]
 	ExpiresAt    orm.Optional[string]
+}
+
+// AppAuthRateLimitsIncrement selects mutable integer columns and their nonzero amounts.
+type AppAuthRateLimitsIncrement struct {
+	AttemptCount orm.Optional[int32]
 }
 
 type AppAuthRateLimitsPrimaryKey struct {
@@ -1002,6 +1493,20 @@ func (repository AppAuthRateLimitsRepository) Insert(input AppAuthRateLimitsInse
 	return orm.DecodeRow[AppAuthRateLimitsRow](row, appAuthRateLimitsTable)
 }
 
+// Upsert inserts or updates supplied mutable columns on the complete primary key.
+func (repository AppAuthRateLimitsRepository) Upsert(input AppAuthRateLimitsUpsert) (AppAuthRateLimitsRow, error) {
+	values := map[string]any{}
+	values["action"] = input.Action
+	values["attempt_count"] = input.AttemptCount
+	values["expires_at"] = input.ExpiresAt
+	values["key_hash"] = input.KeyHash
+	row, err := repository.repository.Upsert(values)
+	if err != nil {
+		return AppAuthRateLimitsRow{}, err
+	}
+	return orm.DecodeRow[AppAuthRateLimitsRow](row, appAuthRateLimitsTable)
+}
+
 func (repository AppAuthRateLimitsRepository) FindByID(key AppAuthRateLimitsPrimaryKey) (*AppAuthRateLimitsRow, error) {
 	row, err := repository.repository.FindByID(map[string]any{"action": key.Action, "key_hash": key.KeyHash})
 	if err != nil || row == nil {
@@ -1015,7 +1520,7 @@ func (repository AppAuthRateLimitsRepository) FindByID(key AppAuthRateLimitsPrim
 }
 
 func (repository AppAuthRateLimitsRepository) FindMany(options orm.FindMany) ([]AppAuthRateLimitsRow, error) {
-	rows, err := repository.repository.Find(options)
+	rows, err := repository.repository.FindMany(options)
 	if err != nil {
 		return nil, err
 	}
@@ -1080,8 +1585,68 @@ func (repository AppAuthRateLimitsRepository) UpdateIf(key AppAuthRateLimitsPrim
 	return &value, nil
 }
 
-func (repository AppAuthRateLimitsRepository) Delete(key AppAuthRateLimitsPrimaryKey) (bool, error) {
-	return repository.repository.Delete(map[string]any{"action": key.Action, "key_hash": key.KeyHash})
+// Increment atomically adds amounts or returns not_found for a missing row.
+func (repository AppAuthRateLimitsRepository) Increment(key AppAuthRateLimitsPrimaryKey, amounts AppAuthRateLimitsIncrement) (AppAuthRateLimitsRow, error) {
+	values := map[string]int32{}
+	if amounts.AttemptCount.Set {
+		if amounts.AttemptCount.Null {
+			return AppAuthRateLimitsRow{}, errors.New("increment cannot be null")
+		}
+		values["attempt_count"] = amounts.AttemptCount.Value
+	}
+	row, err := repository.repository.Increment(map[string]any{"action": key.Action, "key_hash": key.KeyHash}, values)
+	if err != nil {
+		return AppAuthRateLimitsRow{}, err
+	}
+	return orm.DecodeRow[AppAuthRateLimitsRow](row, appAuthRateLimitsTable)
+}
+
+// IncrementIf atomically increments and patches disjoint columns, or returns nil when unmatched.
+func (repository AppAuthRateLimitsRepository) IncrementIf(key AppAuthRateLimitsPrimaryKey, condition orm.Filter, amounts AppAuthRateLimitsIncrement, patch AppAuthRateLimitsUpdate) (*AppAuthRateLimitsRow, error) {
+	increments := map[string]int32{}
+	if amounts.AttemptCount.Set {
+		if amounts.AttemptCount.Null {
+			return nil, errors.New("increment cannot be null")
+		}
+		increments["attempt_count"] = amounts.AttemptCount.Value
+	}
+	values := map[string]any{}
+	if patch.AttemptCount.Set {
+		if patch.AttemptCount.Null {
+			values["attempt_count"] = nil
+		} else {
+			values["attempt_count"] = patch.AttemptCount.Value
+		}
+	}
+	if patch.ExpiresAt.Set {
+		if patch.ExpiresAt.Null {
+			values["expires_at"] = nil
+		} else {
+			values["expires_at"] = patch.ExpiresAt.Value
+		}
+	}
+	row, err := repository.repository.IncrementIf(map[string]any{"action": key.Action, "key_hash": key.KeyHash}, condition, increments, values)
+	if err != nil || row == nil {
+		return nil, err
+	}
+	value, err := orm.DecodeRow[AppAuthRateLimitsRow](row, appAuthRateLimitsTable)
+	if err != nil {
+		return nil, err
+	}
+	return &value, nil
+}
+
+// Delete returns the deleted row, or nil when no row matches the complete primary key.
+func (repository AppAuthRateLimitsRepository) Delete(key AppAuthRateLimitsPrimaryKey) (*AppAuthRateLimitsRow, error) {
+	row, err := repository.repository.Delete(map[string]any{"action": key.Action, "key_hash": key.KeyHash})
+	if err != nil || row == nil {
+		return nil, err
+	}
+	value, err := orm.DecodeRow[AppAuthRateLimitsRow](row, appAuthRateLimitsTable)
+	if err != nil {
+		return nil, err
+	}
+	return &value, nil
 }
 
 var appAuthRefreshTokensTable = orm.Table{Name: "app_auth_refresh_tokens", Primary: []string{"id"}, Columns: []orm.Column{
@@ -1111,12 +1676,26 @@ type AppAuthRefreshTokensInsert struct {
 	TokenHash  string
 }
 
+// AppAuthRefreshTokensUpsert requires every primary key, including keys with defaults.
+type AppAuthRefreshTokensUpsert struct {
+	ConsumedAt orm.Optional[string]
+	CreatedAt  orm.Optional[string]
+	ExpiresAt  string
+	ID         string
+	SessionID  string
+	TokenHash  string
+}
+
 type AppAuthRefreshTokensUpdate struct {
 	ConsumedAt orm.Optional[string]
 	CreatedAt  orm.Optional[string]
 	ExpiresAt  orm.Optional[string]
 	SessionID  orm.Optional[string]
 	TokenHash  orm.Optional[string]
+}
+
+// AppAuthRefreshTokensIncrement selects mutable integer columns and their nonzero amounts.
+type AppAuthRefreshTokensIncrement struct {
 }
 
 type AppAuthRefreshTokensPrimaryKey struct {
@@ -1178,6 +1757,34 @@ func (repository AppAuthRefreshTokensRepository) Insert(input AppAuthRefreshToke
 	return orm.DecodeRow[AppAuthRefreshTokensRow](row, appAuthRefreshTokensTable)
 }
 
+// Upsert inserts or updates supplied mutable columns on the complete primary key.
+func (repository AppAuthRefreshTokensRepository) Upsert(input AppAuthRefreshTokensUpsert) (AppAuthRefreshTokensRow, error) {
+	values := map[string]any{}
+	if input.ConsumedAt.Set {
+		if input.ConsumedAt.Null {
+			values["consumed_at"] = nil
+		} else {
+			values["consumed_at"] = input.ConsumedAt.Value
+		}
+	}
+	if input.CreatedAt.Set {
+		if input.CreatedAt.Null {
+			values["created_at"] = nil
+		} else {
+			values["created_at"] = input.CreatedAt.Value
+		}
+	}
+	values["expires_at"] = input.ExpiresAt
+	values["id"] = input.ID
+	values["session_id"] = input.SessionID
+	values["token_hash"] = input.TokenHash
+	row, err := repository.repository.Upsert(values)
+	if err != nil {
+		return AppAuthRefreshTokensRow{}, err
+	}
+	return orm.DecodeRow[AppAuthRefreshTokensRow](row, appAuthRefreshTokensTable)
+}
+
 func (repository AppAuthRefreshTokensRepository) FindByID(key AppAuthRefreshTokensPrimaryKey) (*AppAuthRefreshTokensRow, error) {
 	row, err := repository.repository.FindByID(map[string]any{"id": key.ID})
 	if err != nil || row == nil {
@@ -1191,7 +1798,7 @@ func (repository AppAuthRefreshTokensRepository) FindByID(key AppAuthRefreshToke
 }
 
 func (repository AppAuthRefreshTokensRepository) FindMany(options orm.FindMany) ([]AppAuthRefreshTokensRow, error) {
-	rows, err := repository.repository.Find(options)
+	rows, err := repository.repository.FindMany(options)
 	if err != nil {
 		return nil, err
 	}
@@ -1298,8 +1905,77 @@ func (repository AppAuthRefreshTokensRepository) UpdateIf(key AppAuthRefreshToke
 	return &value, nil
 }
 
-func (repository AppAuthRefreshTokensRepository) Delete(key AppAuthRefreshTokensPrimaryKey) (bool, error) {
-	return repository.repository.Delete(map[string]any{"id": key.ID})
+// Increment atomically adds amounts or returns not_found for a missing row.
+func (repository AppAuthRefreshTokensRepository) Increment(key AppAuthRefreshTokensPrimaryKey, amounts AppAuthRefreshTokensIncrement) (AppAuthRefreshTokensRow, error) {
+	values := map[string]int32{}
+	row, err := repository.repository.Increment(map[string]any{"id": key.ID}, values)
+	if err != nil {
+		return AppAuthRefreshTokensRow{}, err
+	}
+	return orm.DecodeRow[AppAuthRefreshTokensRow](row, appAuthRefreshTokensTable)
+}
+
+// IncrementIf atomically increments and patches disjoint columns, or returns nil when unmatched.
+func (repository AppAuthRefreshTokensRepository) IncrementIf(key AppAuthRefreshTokensPrimaryKey, condition orm.Filter, amounts AppAuthRefreshTokensIncrement, patch AppAuthRefreshTokensUpdate) (*AppAuthRefreshTokensRow, error) {
+	increments := map[string]int32{}
+	values := map[string]any{}
+	if patch.ConsumedAt.Set {
+		if patch.ConsumedAt.Null {
+			values["consumed_at"] = nil
+		} else {
+			values["consumed_at"] = patch.ConsumedAt.Value
+		}
+	}
+	if patch.CreatedAt.Set {
+		if patch.CreatedAt.Null {
+			values["created_at"] = nil
+		} else {
+			values["created_at"] = patch.CreatedAt.Value
+		}
+	}
+	if patch.ExpiresAt.Set {
+		if patch.ExpiresAt.Null {
+			values["expires_at"] = nil
+		} else {
+			values["expires_at"] = patch.ExpiresAt.Value
+		}
+	}
+	if patch.SessionID.Set {
+		if patch.SessionID.Null {
+			values["session_id"] = nil
+		} else {
+			values["session_id"] = patch.SessionID.Value
+		}
+	}
+	if patch.TokenHash.Set {
+		if patch.TokenHash.Null {
+			values["token_hash"] = nil
+		} else {
+			values["token_hash"] = patch.TokenHash.Value
+		}
+	}
+	row, err := repository.repository.IncrementIf(map[string]any{"id": key.ID}, condition, increments, values)
+	if err != nil || row == nil {
+		return nil, err
+	}
+	value, err := orm.DecodeRow[AppAuthRefreshTokensRow](row, appAuthRefreshTokensTable)
+	if err != nil {
+		return nil, err
+	}
+	return &value, nil
+}
+
+// Delete returns the deleted row, or nil when no row matches the complete primary key.
+func (repository AppAuthRefreshTokensRepository) Delete(key AppAuthRefreshTokensPrimaryKey) (*AppAuthRefreshTokensRow, error) {
+	row, err := repository.repository.Delete(map[string]any{"id": key.ID})
+	if err != nil || row == nil {
+		return nil, err
+	}
+	value, err := orm.DecodeRow[AppAuthRefreshTokensRow](row, appAuthRefreshTokensTable)
+	if err != nil {
+		return nil, err
+	}
+	return &value, nil
 }
 
 var appAuthSessionsTable = orm.Table{Name: "app_auth_sessions", Primary: []string{"id"}, Columns: []orm.Column{
@@ -1341,6 +2017,20 @@ type AppAuthSessionsInsert struct {
 	UserSessionVersion int32
 }
 
+// AppAuthSessionsUpsert requires every primary key, including keys with defaults.
+type AppAuthSessionsUpsert struct {
+	CreatedAt          orm.Optional[string]
+	ExpiresAt          string
+	FirstLoginAt       orm.Optional[string]
+	ID                 string
+	LastRenewedAt      orm.Optional[string]
+	RevokedAt          orm.Optional[string]
+	TokenHash          string
+	Transport          orm.Optional[string]
+	UserID             string
+	UserSessionVersion int32
+}
+
 type AppAuthSessionsUpdate struct {
 	CreatedAt          orm.Optional[string]
 	ExpiresAt          orm.Optional[string]
@@ -1350,6 +2040,11 @@ type AppAuthSessionsUpdate struct {
 	TokenHash          orm.Optional[string]
 	Transport          orm.Optional[string]
 	UserID             orm.Optional[string]
+	UserSessionVersion orm.Optional[int32]
+}
+
+// AppAuthSessionsIncrement selects mutable integer columns and their nonzero amounts.
+type AppAuthSessionsIncrement struct {
 	UserSessionVersion orm.Optional[int32]
 }
 
@@ -1442,6 +2137,56 @@ func (repository AppAuthSessionsRepository) Insert(input AppAuthSessionsInsert) 
 	return orm.DecodeRow[AppAuthSessionsRow](row, appAuthSessionsTable)
 }
 
+// Upsert inserts or updates supplied mutable columns on the complete primary key.
+func (repository AppAuthSessionsRepository) Upsert(input AppAuthSessionsUpsert) (AppAuthSessionsRow, error) {
+	values := map[string]any{}
+	if input.CreatedAt.Set {
+		if input.CreatedAt.Null {
+			values["created_at"] = nil
+		} else {
+			values["created_at"] = input.CreatedAt.Value
+		}
+	}
+	values["expires_at"] = input.ExpiresAt
+	if input.FirstLoginAt.Set {
+		if input.FirstLoginAt.Null {
+			values["first_login_at"] = nil
+		} else {
+			values["first_login_at"] = input.FirstLoginAt.Value
+		}
+	}
+	values["id"] = input.ID
+	if input.LastRenewedAt.Set {
+		if input.LastRenewedAt.Null {
+			values["last_renewed_at"] = nil
+		} else {
+			values["last_renewed_at"] = input.LastRenewedAt.Value
+		}
+	}
+	if input.RevokedAt.Set {
+		if input.RevokedAt.Null {
+			values["revoked_at"] = nil
+		} else {
+			values["revoked_at"] = input.RevokedAt.Value
+		}
+	}
+	values["token_hash"] = input.TokenHash
+	if input.Transport.Set {
+		if input.Transport.Null {
+			values["transport"] = nil
+		} else {
+			values["transport"] = input.Transport.Value
+		}
+	}
+	values["user_id"] = input.UserID
+	values["user_session_version"] = input.UserSessionVersion
+	row, err := repository.repository.Upsert(values)
+	if err != nil {
+		return AppAuthSessionsRow{}, err
+	}
+	return orm.DecodeRow[AppAuthSessionsRow](row, appAuthSessionsTable)
+}
+
 func (repository AppAuthSessionsRepository) FindByID(key AppAuthSessionsPrimaryKey) (*AppAuthSessionsRow, error) {
 	row, err := repository.repository.FindByID(map[string]any{"id": key.ID})
 	if err != nil || row == nil {
@@ -1455,7 +2200,7 @@ func (repository AppAuthSessionsRepository) FindByID(key AppAuthSessionsPrimaryK
 }
 
 func (repository AppAuthSessionsRepository) FindMany(options orm.FindMany) ([]AppAuthSessionsRow, error) {
-	rows, err := repository.repository.Find(options)
+	rows, err := repository.repository.FindMany(options)
 	if err != nil {
 		return nil, err
 	}
@@ -1618,8 +2363,117 @@ func (repository AppAuthSessionsRepository) UpdateIf(key AppAuthSessionsPrimaryK
 	return &value, nil
 }
 
-func (repository AppAuthSessionsRepository) Delete(key AppAuthSessionsPrimaryKey) (bool, error) {
-	return repository.repository.Delete(map[string]any{"id": key.ID})
+// Increment atomically adds amounts or returns not_found for a missing row.
+func (repository AppAuthSessionsRepository) Increment(key AppAuthSessionsPrimaryKey, amounts AppAuthSessionsIncrement) (AppAuthSessionsRow, error) {
+	values := map[string]int32{}
+	if amounts.UserSessionVersion.Set {
+		if amounts.UserSessionVersion.Null {
+			return AppAuthSessionsRow{}, errors.New("increment cannot be null")
+		}
+		values["user_session_version"] = amounts.UserSessionVersion.Value
+	}
+	row, err := repository.repository.Increment(map[string]any{"id": key.ID}, values)
+	if err != nil {
+		return AppAuthSessionsRow{}, err
+	}
+	return orm.DecodeRow[AppAuthSessionsRow](row, appAuthSessionsTable)
+}
+
+// IncrementIf atomically increments and patches disjoint columns, or returns nil when unmatched.
+func (repository AppAuthSessionsRepository) IncrementIf(key AppAuthSessionsPrimaryKey, condition orm.Filter, amounts AppAuthSessionsIncrement, patch AppAuthSessionsUpdate) (*AppAuthSessionsRow, error) {
+	increments := map[string]int32{}
+	if amounts.UserSessionVersion.Set {
+		if amounts.UserSessionVersion.Null {
+			return nil, errors.New("increment cannot be null")
+		}
+		increments["user_session_version"] = amounts.UserSessionVersion.Value
+	}
+	values := map[string]any{}
+	if patch.CreatedAt.Set {
+		if patch.CreatedAt.Null {
+			values["created_at"] = nil
+		} else {
+			values["created_at"] = patch.CreatedAt.Value
+		}
+	}
+	if patch.ExpiresAt.Set {
+		if patch.ExpiresAt.Null {
+			values["expires_at"] = nil
+		} else {
+			values["expires_at"] = patch.ExpiresAt.Value
+		}
+	}
+	if patch.FirstLoginAt.Set {
+		if patch.FirstLoginAt.Null {
+			values["first_login_at"] = nil
+		} else {
+			values["first_login_at"] = patch.FirstLoginAt.Value
+		}
+	}
+	if patch.LastRenewedAt.Set {
+		if patch.LastRenewedAt.Null {
+			values["last_renewed_at"] = nil
+		} else {
+			values["last_renewed_at"] = patch.LastRenewedAt.Value
+		}
+	}
+	if patch.RevokedAt.Set {
+		if patch.RevokedAt.Null {
+			values["revoked_at"] = nil
+		} else {
+			values["revoked_at"] = patch.RevokedAt.Value
+		}
+	}
+	if patch.TokenHash.Set {
+		if patch.TokenHash.Null {
+			values["token_hash"] = nil
+		} else {
+			values["token_hash"] = patch.TokenHash.Value
+		}
+	}
+	if patch.Transport.Set {
+		if patch.Transport.Null {
+			values["transport"] = nil
+		} else {
+			values["transport"] = patch.Transport.Value
+		}
+	}
+	if patch.UserID.Set {
+		if patch.UserID.Null {
+			values["user_id"] = nil
+		} else {
+			values["user_id"] = patch.UserID.Value
+		}
+	}
+	if patch.UserSessionVersion.Set {
+		if patch.UserSessionVersion.Null {
+			values["user_session_version"] = nil
+		} else {
+			values["user_session_version"] = patch.UserSessionVersion.Value
+		}
+	}
+	row, err := repository.repository.IncrementIf(map[string]any{"id": key.ID}, condition, increments, values)
+	if err != nil || row == nil {
+		return nil, err
+	}
+	value, err := orm.DecodeRow[AppAuthSessionsRow](row, appAuthSessionsTable)
+	if err != nil {
+		return nil, err
+	}
+	return &value, nil
+}
+
+// Delete returns the deleted row, or nil when no row matches the complete primary key.
+func (repository AppAuthSessionsRepository) Delete(key AppAuthSessionsPrimaryKey) (*AppAuthSessionsRow, error) {
+	row, err := repository.repository.Delete(map[string]any{"id": key.ID})
+	if err != nil || row == nil {
+		return nil, err
+	}
+	value, err := orm.DecodeRow[AppAuthSessionsRow](row, appAuthSessionsTable)
+	if err != nil {
+		return nil, err
+	}
+	return &value, nil
 }
 
 var appAuthSignupRequestsTable = orm.Table{Name: "app_auth_signup_requests", Primary: []string{"id"}, Columns: []orm.Column{
@@ -1661,6 +2515,20 @@ type AppAuthSignupRequestsInsert struct {
 	UpdatedAt     orm.Optional[string]
 }
 
+// AppAuthSignupRequestsUpsert requires every primary key, including keys with defaults.
+type AppAuthSignupRequestsUpsert struct {
+	Attempts      orm.Optional[int32]
+	CodeExpiresAt string
+	CodeHash      string
+	CreatedAt     orm.Optional[string]
+	Email         string
+	ExpiresAt     string
+	ID            string
+	InviteID      orm.Optional[string]
+	PasswordHash  string
+	UpdatedAt     orm.Optional[string]
+}
+
 type AppAuthSignupRequestsUpdate struct {
 	Attempts      orm.Optional[int32]
 	CodeExpiresAt orm.Optional[string]
@@ -1671,6 +2539,11 @@ type AppAuthSignupRequestsUpdate struct {
 	InviteID      orm.Optional[string]
 	PasswordHash  orm.Optional[string]
 	UpdatedAt     orm.Optional[string]
+}
+
+// AppAuthSignupRequestsIncrement selects mutable integer columns and their nonzero amounts.
+type AppAuthSignupRequestsIncrement struct {
+	Attempts orm.Optional[int32]
 }
 
 type AppAuthSignupRequestsPrimaryKey struct {
@@ -1756,6 +2629,50 @@ func (repository AppAuthSignupRequestsRepository) Insert(input AppAuthSignupRequ
 	return orm.DecodeRow[AppAuthSignupRequestsRow](row, appAuthSignupRequestsTable)
 }
 
+// Upsert inserts or updates supplied mutable columns on the complete primary key.
+func (repository AppAuthSignupRequestsRepository) Upsert(input AppAuthSignupRequestsUpsert) (AppAuthSignupRequestsRow, error) {
+	values := map[string]any{}
+	if input.Attempts.Set {
+		if input.Attempts.Null {
+			values["attempts"] = nil
+		} else {
+			values["attempts"] = input.Attempts.Value
+		}
+	}
+	values["code_expires_at"] = input.CodeExpiresAt
+	values["code_hash"] = input.CodeHash
+	if input.CreatedAt.Set {
+		if input.CreatedAt.Null {
+			values["created_at"] = nil
+		} else {
+			values["created_at"] = input.CreatedAt.Value
+		}
+	}
+	values["email"] = input.Email
+	values["expires_at"] = input.ExpiresAt
+	values["id"] = input.ID
+	if input.InviteID.Set {
+		if input.InviteID.Null {
+			values["invite_id"] = nil
+		} else {
+			values["invite_id"] = input.InviteID.Value
+		}
+	}
+	values["password_hash"] = input.PasswordHash
+	if input.UpdatedAt.Set {
+		if input.UpdatedAt.Null {
+			values["updated_at"] = nil
+		} else {
+			values["updated_at"] = input.UpdatedAt.Value
+		}
+	}
+	row, err := repository.repository.Upsert(values)
+	if err != nil {
+		return AppAuthSignupRequestsRow{}, err
+	}
+	return orm.DecodeRow[AppAuthSignupRequestsRow](row, appAuthSignupRequestsTable)
+}
+
 func (repository AppAuthSignupRequestsRepository) FindByID(key AppAuthSignupRequestsPrimaryKey) (*AppAuthSignupRequestsRow, error) {
 	row, err := repository.repository.FindByID(map[string]any{"id": key.ID})
 	if err != nil || row == nil {
@@ -1769,7 +2686,7 @@ func (repository AppAuthSignupRequestsRepository) FindByID(key AppAuthSignupRequ
 }
 
 func (repository AppAuthSignupRequestsRepository) FindMany(options orm.FindMany) ([]AppAuthSignupRequestsRow, error) {
-	rows, err := repository.repository.Find(options)
+	rows, err := repository.repository.FindMany(options)
 	if err != nil {
 		return nil, err
 	}
@@ -1932,8 +2849,117 @@ func (repository AppAuthSignupRequestsRepository) UpdateIf(key AppAuthSignupRequ
 	return &value, nil
 }
 
-func (repository AppAuthSignupRequestsRepository) Delete(key AppAuthSignupRequestsPrimaryKey) (bool, error) {
-	return repository.repository.Delete(map[string]any{"id": key.ID})
+// Increment atomically adds amounts or returns not_found for a missing row.
+func (repository AppAuthSignupRequestsRepository) Increment(key AppAuthSignupRequestsPrimaryKey, amounts AppAuthSignupRequestsIncrement) (AppAuthSignupRequestsRow, error) {
+	values := map[string]int32{}
+	if amounts.Attempts.Set {
+		if amounts.Attempts.Null {
+			return AppAuthSignupRequestsRow{}, errors.New("increment cannot be null")
+		}
+		values["attempts"] = amounts.Attempts.Value
+	}
+	row, err := repository.repository.Increment(map[string]any{"id": key.ID}, values)
+	if err != nil {
+		return AppAuthSignupRequestsRow{}, err
+	}
+	return orm.DecodeRow[AppAuthSignupRequestsRow](row, appAuthSignupRequestsTable)
+}
+
+// IncrementIf atomically increments and patches disjoint columns, or returns nil when unmatched.
+func (repository AppAuthSignupRequestsRepository) IncrementIf(key AppAuthSignupRequestsPrimaryKey, condition orm.Filter, amounts AppAuthSignupRequestsIncrement, patch AppAuthSignupRequestsUpdate) (*AppAuthSignupRequestsRow, error) {
+	increments := map[string]int32{}
+	if amounts.Attempts.Set {
+		if amounts.Attempts.Null {
+			return nil, errors.New("increment cannot be null")
+		}
+		increments["attempts"] = amounts.Attempts.Value
+	}
+	values := map[string]any{}
+	if patch.Attempts.Set {
+		if patch.Attempts.Null {
+			values["attempts"] = nil
+		} else {
+			values["attempts"] = patch.Attempts.Value
+		}
+	}
+	if patch.CodeExpiresAt.Set {
+		if patch.CodeExpiresAt.Null {
+			values["code_expires_at"] = nil
+		} else {
+			values["code_expires_at"] = patch.CodeExpiresAt.Value
+		}
+	}
+	if patch.CodeHash.Set {
+		if patch.CodeHash.Null {
+			values["code_hash"] = nil
+		} else {
+			values["code_hash"] = patch.CodeHash.Value
+		}
+	}
+	if patch.CreatedAt.Set {
+		if patch.CreatedAt.Null {
+			values["created_at"] = nil
+		} else {
+			values["created_at"] = patch.CreatedAt.Value
+		}
+	}
+	if patch.Email.Set {
+		if patch.Email.Null {
+			values["email"] = nil
+		} else {
+			values["email"] = patch.Email.Value
+		}
+	}
+	if patch.ExpiresAt.Set {
+		if patch.ExpiresAt.Null {
+			values["expires_at"] = nil
+		} else {
+			values["expires_at"] = patch.ExpiresAt.Value
+		}
+	}
+	if patch.InviteID.Set {
+		if patch.InviteID.Null {
+			values["invite_id"] = nil
+		} else {
+			values["invite_id"] = patch.InviteID.Value
+		}
+	}
+	if patch.PasswordHash.Set {
+		if patch.PasswordHash.Null {
+			values["password_hash"] = nil
+		} else {
+			values["password_hash"] = patch.PasswordHash.Value
+		}
+	}
+	if patch.UpdatedAt.Set {
+		if patch.UpdatedAt.Null {
+			values["updated_at"] = nil
+		} else {
+			values["updated_at"] = patch.UpdatedAt.Value
+		}
+	}
+	row, err := repository.repository.IncrementIf(map[string]any{"id": key.ID}, condition, increments, values)
+	if err != nil || row == nil {
+		return nil, err
+	}
+	value, err := orm.DecodeRow[AppAuthSignupRequestsRow](row, appAuthSignupRequestsTable)
+	if err != nil {
+		return nil, err
+	}
+	return &value, nil
+}
+
+// Delete returns the deleted row, or nil when no row matches the complete primary key.
+func (repository AppAuthSignupRequestsRepository) Delete(key AppAuthSignupRequestsPrimaryKey) (*AppAuthSignupRequestsRow, error) {
+	row, err := repository.repository.Delete(map[string]any{"id": key.ID})
+	if err != nil || row == nil {
+		return nil, err
+	}
+	value, err := orm.DecodeRow[AppAuthSignupRequestsRow](row, appAuthSignupRequestsTable)
+	if err != nil {
+		return nil, err
+	}
+	return &value, nil
 }
 
 var appAuthUsersTable = orm.Table{Name: "app_auth_users", Primary: []string{"id"}, Columns: []orm.Column{
@@ -1966,6 +2992,17 @@ type AppAuthUsersInsert struct {
 	SessionVersion  orm.Optional[int32]
 }
 
+// AppAuthUsersUpsert requires every primary key, including keys with defaults.
+type AppAuthUsersUpsert struct {
+	CreatedAt       orm.Optional[string]
+	DisabledAt      orm.Optional[string]
+	Email           string
+	EmailVerifiedAt orm.Optional[string]
+	ID              string
+	PasswordHash    orm.Optional[string]
+	SessionVersion  orm.Optional[int32]
+}
+
 type AppAuthUsersUpdate struct {
 	CreatedAt       orm.Optional[string]
 	DisabledAt      orm.Optional[string]
@@ -1973,6 +3010,11 @@ type AppAuthUsersUpdate struct {
 	EmailVerifiedAt orm.Optional[string]
 	PasswordHash    orm.Optional[string]
 	SessionVersion  orm.Optional[int32]
+}
+
+// AppAuthUsersIncrement selects mutable integer columns and their nonzero amounts.
+type AppAuthUsersIncrement struct {
+	SessionVersion orm.Optional[int32]
 }
 
 type AppAuthUsersPrimaryKey struct {
@@ -2055,6 +3097,53 @@ func (repository AppAuthUsersRepository) Insert(input AppAuthUsersInsert) (AppAu
 	return orm.DecodeRow[AppAuthUsersRow](row, appAuthUsersTable)
 }
 
+// Upsert inserts or updates supplied mutable columns on the complete primary key.
+func (repository AppAuthUsersRepository) Upsert(input AppAuthUsersUpsert) (AppAuthUsersRow, error) {
+	values := map[string]any{}
+	if input.CreatedAt.Set {
+		if input.CreatedAt.Null {
+			values["created_at"] = nil
+		} else {
+			values["created_at"] = input.CreatedAt.Value
+		}
+	}
+	if input.DisabledAt.Set {
+		if input.DisabledAt.Null {
+			values["disabled_at"] = nil
+		} else {
+			values["disabled_at"] = input.DisabledAt.Value
+		}
+	}
+	values["email"] = input.Email
+	if input.EmailVerifiedAt.Set {
+		if input.EmailVerifiedAt.Null {
+			values["email_verified_at"] = nil
+		} else {
+			values["email_verified_at"] = input.EmailVerifiedAt.Value
+		}
+	}
+	values["id"] = input.ID
+	if input.PasswordHash.Set {
+		if input.PasswordHash.Null {
+			values["password_hash"] = nil
+		} else {
+			values["password_hash"] = input.PasswordHash.Value
+		}
+	}
+	if input.SessionVersion.Set {
+		if input.SessionVersion.Null {
+			values["session_version"] = nil
+		} else {
+			values["session_version"] = input.SessionVersion.Value
+		}
+	}
+	row, err := repository.repository.Upsert(values)
+	if err != nil {
+		return AppAuthUsersRow{}, err
+	}
+	return orm.DecodeRow[AppAuthUsersRow](row, appAuthUsersTable)
+}
+
 func (repository AppAuthUsersRepository) FindByID(key AppAuthUsersPrimaryKey) (*AppAuthUsersRow, error) {
 	row, err := repository.repository.FindByID(map[string]any{"id": key.ID})
 	if err != nil || row == nil {
@@ -2068,7 +3157,7 @@ func (repository AppAuthUsersRepository) FindByID(key AppAuthUsersPrimaryKey) (*
 }
 
 func (repository AppAuthUsersRepository) FindMany(options orm.FindMany) ([]AppAuthUsersRow, error) {
-	rows, err := repository.repository.Find(options)
+	rows, err := repository.repository.FindMany(options)
 	if err != nil {
 		return nil, err
 	}
@@ -2189,6 +3278,94 @@ func (repository AppAuthUsersRepository) UpdateIf(key AppAuthUsersPrimaryKey, co
 	return &value, nil
 }
 
-func (repository AppAuthUsersRepository) Delete(key AppAuthUsersPrimaryKey) (bool, error) {
-	return repository.repository.Delete(map[string]any{"id": key.ID})
+// Increment atomically adds amounts or returns not_found for a missing row.
+func (repository AppAuthUsersRepository) Increment(key AppAuthUsersPrimaryKey, amounts AppAuthUsersIncrement) (AppAuthUsersRow, error) {
+	values := map[string]int32{}
+	if amounts.SessionVersion.Set {
+		if amounts.SessionVersion.Null {
+			return AppAuthUsersRow{}, errors.New("increment cannot be null")
+		}
+		values["session_version"] = amounts.SessionVersion.Value
+	}
+	row, err := repository.repository.Increment(map[string]any{"id": key.ID}, values)
+	if err != nil {
+		return AppAuthUsersRow{}, err
+	}
+	return orm.DecodeRow[AppAuthUsersRow](row, appAuthUsersTable)
+}
+
+// IncrementIf atomically increments and patches disjoint columns, or returns nil when unmatched.
+func (repository AppAuthUsersRepository) IncrementIf(key AppAuthUsersPrimaryKey, condition orm.Filter, amounts AppAuthUsersIncrement, patch AppAuthUsersUpdate) (*AppAuthUsersRow, error) {
+	increments := map[string]int32{}
+	if amounts.SessionVersion.Set {
+		if amounts.SessionVersion.Null {
+			return nil, errors.New("increment cannot be null")
+		}
+		increments["session_version"] = amounts.SessionVersion.Value
+	}
+	values := map[string]any{}
+	if patch.CreatedAt.Set {
+		if patch.CreatedAt.Null {
+			values["created_at"] = nil
+		} else {
+			values["created_at"] = patch.CreatedAt.Value
+		}
+	}
+	if patch.DisabledAt.Set {
+		if patch.DisabledAt.Null {
+			values["disabled_at"] = nil
+		} else {
+			values["disabled_at"] = patch.DisabledAt.Value
+		}
+	}
+	if patch.Email.Set {
+		if patch.Email.Null {
+			values["email"] = nil
+		} else {
+			values["email"] = patch.Email.Value
+		}
+	}
+	if patch.EmailVerifiedAt.Set {
+		if patch.EmailVerifiedAt.Null {
+			values["email_verified_at"] = nil
+		} else {
+			values["email_verified_at"] = patch.EmailVerifiedAt.Value
+		}
+	}
+	if patch.PasswordHash.Set {
+		if patch.PasswordHash.Null {
+			values["password_hash"] = nil
+		} else {
+			values["password_hash"] = patch.PasswordHash.Value
+		}
+	}
+	if patch.SessionVersion.Set {
+		if patch.SessionVersion.Null {
+			values["session_version"] = nil
+		} else {
+			values["session_version"] = patch.SessionVersion.Value
+		}
+	}
+	row, err := repository.repository.IncrementIf(map[string]any{"id": key.ID}, condition, increments, values)
+	if err != nil || row == nil {
+		return nil, err
+	}
+	value, err := orm.DecodeRow[AppAuthUsersRow](row, appAuthUsersTable)
+	if err != nil {
+		return nil, err
+	}
+	return &value, nil
+}
+
+// Delete returns the deleted row, or nil when no row matches the complete primary key.
+func (repository AppAuthUsersRepository) Delete(key AppAuthUsersPrimaryKey) (*AppAuthUsersRow, error) {
+	row, err := repository.repository.Delete(map[string]any{"id": key.ID})
+	if err != nil || row == nil {
+		return nil, err
+	}
+	value, err := orm.DecodeRow[AppAuthUsersRow](row, appAuthUsersTable)
+	if err != nil {
+		return nil, err
+	}
+	return &value, nil
 }

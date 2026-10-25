@@ -185,7 +185,7 @@ func (auth *Auth) rateLimit(action, email string) error {
 			count = 1
 			until = timestamp(time.Now().Add(900 * time.Second))
 		}
-		updated, err := repo.UpdateIf(key, orm.And(fields.AttemptCount.Equal(row.AttemptCount), fields.ExpiresAt.Equal(row.ExpiresAt)), private.AppAuthRateLimitsUpdate{AttemptCount: set(count), ExpiresAt: set(until)})
+		updated, err := repo.UpdateIf(key, orm.And(fields.AttemptCount.Eq(row.AttemptCount), fields.ExpiresAt.Eq(row.ExpiresAt)), private.AppAuthRateLimitsUpdate{AttemptCount: set(count), ExpiresAt: set(until)})
 		if err != nil {
 			return err
 		}
@@ -259,7 +259,7 @@ func (auth *Auth) signin(email, password string) (Tokens, error) {
 		return Tokens{}, err
 	}
 	repo := auth.db.AppAuthUsers
-	rows, err := repo.FindMany(orm.FindMany{Where: repo.Columns().Email.Equal(email), Limit: new(int32(1))})
+	rows, err := repo.FindMany(orm.FindMany{Where: repo.Columns().Email.Eq(email), Limit: new(int32(1))})
 	if err != nil {
 		return Tokens{}, err
 	}
@@ -302,7 +302,7 @@ func (auth *Auth) session(authorization *string) (*sessionInfo, error) {
 		return nil, fail(401, "invalid_token")
 	}
 	repo := auth.db.AppAuthSessions
-	rows, err := repo.FindMany(orm.FindMany{Where: repo.Columns().TokenHash.Equal(digest(bearer)), Limit: new(int32(1))})
+	rows, err := repo.FindMany(orm.FindMany{Where: repo.Columns().TokenHash.Eq(digest(bearer)), Limit: new(int32(1))})
 	if err != nil {
 		return nil, err
 	}
@@ -313,7 +313,7 @@ func (auth *Auth) session(authorization *string) (*sessionInfo, error) {
 	var result *sessionInfo
 	err = auth.db.Transaction(func(db *private.Database) error {
 		sessions := db.AppAuthSessions
-		locked, err := sessions.UpdateIf(private.AppAuthSessionsPrimaryKey{ID: row.ID}, orm.And(sessions.Columns().RevokedAt.IsNull(), sessions.Columns().TokenHash.Equal(digest(bearer))), private.AppAuthSessionsUpdate{RevokedAt: null[string]()})
+		locked, err := sessions.UpdateIf(private.AppAuthSessionsPrimaryKey{ID: row.ID}, orm.And(sessions.Columns().RevokedAt.IsNull(), sessions.Columns().TokenHash.Eq(digest(bearer))), private.AppAuthSessionsUpdate{RevokedAt: null[string]()})
 		if err != nil || locked == nil {
 			return err
 		}
@@ -363,7 +363,7 @@ func (auth *Auth) refresh(value string) (Tokens, error) {
 		return Tokens{}, fail(401, "invalid_token")
 	}
 	repo := auth.db.AppAuthRefreshTokens
-	rows, err := repo.FindMany(orm.FindMany{Where: repo.Columns().TokenHash.Equal(digest(value)), Limit: new(int32(1))})
+	rows, err := repo.FindMany(orm.FindMany{Where: repo.Columns().TokenHash.Eq(digest(value)), Limit: new(int32(1))})
 	if err != nil {
 		return Tokens{}, err
 	}

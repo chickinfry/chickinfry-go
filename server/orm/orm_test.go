@@ -2,9 +2,42 @@ package orm
 
 import (
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 )
+
+func TestComparisonFilters(t *testing.T) {
+	repository := Repository{Table: Table{Columns: []Column{{Name: "count", Kind: "integer"}}}}
+	field := Field[int32]{Name: "count"}
+	for _, test := range []struct {
+		name   string
+		filter Filter
+		want   string
+		params []any
+	}{
+		{"equal", field.Eq(4), `"count" = $1`, []any{int32(4)}},
+		{"not equal", field.Ne(4), `"count" <> $1`, []any{int32(4)}},
+		{"greater", field.Gt(4), `"count" > $1`, []any{int32(4)}},
+		{"greater or equal", field.Gte(4), `"count" >= $1`, []any{int32(4)}},
+		{"less", field.Lt(4), `"count" < $1`, []any{int32(4)}},
+		{"less or equal", field.Lte(4), `"count" <= $1`, []any{int32(4)}},
+		{"membership", field.IsIn([]int32{4, 7}), `"count" in ($1, $2)`, []any{int32(4), int32(7)}},
+		{"empty membership", field.IsIn(nil), "1 = 0", nil},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var params []any
+			sql, err := repository.filter(test.filter, &params, 0)
+			if err != nil || sql != test.want || !reflect.DeepEqual(params, test.params) {
+				t.Fatalf("filter = %q, %v, %v; want %q, %v", sql, params, err, test.want, test.params)
+			}
+		})
+	}
+	var params []any
+	if _, err := repository.filter(Field[string]{Name: "count"}.IsIn([]string{"4"}), &params, 0); err == nil {
+		t.Fatal("membership bypassed column type validation")
+	}
+}
 
 func TestSchemaValidationBeforeIO(t *testing.T) {
 	if err := validate(Column{Kind: "string"}, string([]byte{0xff})); err == nil {
@@ -21,7 +54,7 @@ func TestSchemaValidationBeforeIO(t *testing.T) {
 		t.Fatal("primary key patch accepted")
 	}
 	key := map[string]any{"id": "00000000-0000-0000-0000-000000000001", "tenant": "t"}
-	for _, condition := range []Filter{{}, Field[string]{Name: "unknown"}.Equal("n")} {
+	for _, condition := range []Filter{{}, Field[string]{Name: "unknown"}.Eq("n")} {
 		if _, err := repository.UpdateIf(key, condition, map[string]any{"name": "updated"}); err == nil {
 			t.Fatal("conditional update accepted an invalid predicate before I/O")
 		}
@@ -35,11 +68,11 @@ func TestSchemaValidationBeforeIO(t *testing.T) {
 		t.Fatalf("default omission: %v %v", columns, err)
 	}
 	params = nil
-	sql, err := repository.filter(And(Field[string]{Name: "name"}.Equal("' or true --"), Not(Field[int32]{Name: "count"}.Greater(4))), &params, 0)
+	sql, err := repository.filter(And(Field[string]{Name: "name"}.Eq("' or true --"), Not(Field[int32]{Name: "count"}.Gt(4))), &params, 0)
 	if err != nil || strings.Contains(sql, "true") || len(params) != 2 {
 		t.Fatalf("unparameterized filter: %s %v", sql, err)
 	}
-	if _, err := repository.filter(Field[string]{Name: "unknown"}.Equal("n"), &params, 0); err == nil {
+	if _, err := repository.filter(Field[string]{Name: "unknown"}.Eq("n"), &params, 0); err == nil {
 		t.Fatal("unknown column accepted")
 	}
 
