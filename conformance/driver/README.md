@@ -9,14 +9,16 @@ artifact identity and conformance verdicts.
 
 The repository-root `driver.json` supplies a typed build declaration: `tool: go`,
 relative entry `conformance/driver/cmd/driver`, and empty `features`. The coordinator
-copies the repository, connects `chickinfry-client-plain` and
-`chickinfry-client-auth` through local module replacements, and executes its fixed
+copies the repository, connects the `chickinfry-client-plain`,
+`chickinfry-client-auth` and `chickinfry-client-empty-session` SDK packages through local module replacements, and executes its fixed
 offline `go build -mod=readonly -buildvcs=false -tags=chik_conformance` template.
 There is no custom builder, shell command, driver-selected output directory, or
 committed generated SDK. The declaration pins the implementation commit; its
 publication commit changes only declaration metadata.
 
-Every client creation request requires `fixture: "plain"` or `fixture: "auth"`.
+Every client creation request requires `fixture: "plain"`, `fixture: "auth"`, or
+`fixture: "emptySession"`. The empty-session fixture keeps one generated SDK
+client per transport for the lifetime of a case.
 The driver selects the corresponding fixed generated SDK alias, and copies retain
 that selection. Missing, empty, null, non-string and unknown values are
 `invalid_args`. Fixture identity is never inferred from operation names, case IDs,
@@ -42,7 +44,8 @@ The driver adds no SDK refresh flight, request retry, refresh lock or credential
 comparison. Session commands use the runtime's `MemoryStore` directly, including
 the same pointer for clients sharing a store. Protected full session records are
 validated against their token references and origin before `MemoryStore.Set`.
-Store bindings reject a different client origin.
+Omit all three credential references on `session.store.create` to start with an
+empty store. Store bindings reject a different client origin.
 
 The store's wire `revision` comes from the tagged runtime observation and counts
 every successful Set, stored refresh result, and Clear that deletes credentials.

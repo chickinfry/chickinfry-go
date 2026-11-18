@@ -117,7 +117,7 @@ func (s *server) dispatch(req request) *Error {
 				return failure("driver", "invalid_args")
 			}
 		} else {
-			if a.Fixture != "plain" && a.Fixture != "auth" {
+			if a.Fixture != "plain" && a.Fixture != "auth" && a.Fixture != "emptySession" {
 				return failure("driver", "invalid_args")
 			}
 			fixture = a.Fixture

@@ -20,20 +20,32 @@ type MemoryStore struct {
 
 // Credentials returns a snapshot of the current credentials, or zero when empty.
 func (store *MemoryStore) Credentials() SessionCredentials {
+	credentials, _ := store.snapshot()
+	return credentials
+}
+
+func (store *MemoryStore) snapshot() (SessionCredentials, uint64) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
-	return store.credentials
+	return store.credentials, store.revision
 }
 
 // Set replaces the session with login credentials without waiting for a refresh.
 // In-flight refresh results cannot overwrite this replacement, even if it uses
 // the same credentials as the previous session.
 func (store *MemoryStore) Set(credentials SessionCredentials) error {
+	return store.set(credentials, nil)
+}
+
+func (store *MemoryStore) set(credentials SessionCredentials, expected *uint64) error {
 	if !validCredentials(credentials) {
 		return &ClientError{Code: CodeInvalidArgument, Message: "invalid session credential"}
 	}
 	store.mu.Lock()
 	defer store.mu.Unlock()
+	if expected != nil && store.revision != *expected {
+		return &ClientError{Code: CodeUnauthenticated, Message: "session changed", OutcomeUnknown: true}
+	}
 	store.credentials = credentials
 	store.revision++
 	return nil

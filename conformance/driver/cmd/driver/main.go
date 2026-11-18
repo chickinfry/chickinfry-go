@@ -68,6 +68,8 @@ func call(ctx context.Context, transport *chickinfry.HTTPTransport, operation st
 		return callPlain(ctx, transport, operation, input)
 	case "auth":
 		return callAuth(ctx, transport, operation, input)
+	case "emptySession":
+		return callEmptySession(ctx, transport, operation, input)
 	default:
 		return nil, driver.Unimplemented()
 	}

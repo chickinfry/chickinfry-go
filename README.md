@@ -68,20 +68,19 @@ Use a shared `MemoryStore` to keep a session in memory:
 
 ```go
 store := new(chickinfry.MemoryStore)
-if err := store.Set(credentials); err != nil {
-	return err
-}
 signed, err := transport.WithSession(store)
 ```
 
-`credentials` is the complete `SessionCredentials` bundle returned by login.
-Clients bound to the same store pointer share one refresh, then each retries its
+Generated authentication calls adopt successful login credentials in the
+memory store and clear matching credentials after successful logout. Set can
+also adopt an existing credential bundle. Public operations can run with an
+empty store. Clients bound to the same store pointer share one refresh, then each retries its
 original request once. Rejected refreshes clear only matching credentials; a
 concurrent `Set` or `Clear` prevents a late refresh from overwriting the session.
 The store does not persist credentials or coordinate across processes. Scope
 each store to one origin. Custom
 `SessionStore` implementations retain responsibility for serializing refreshes,
-saving successful results, and clearing only matching credentials.
+saving login and refresh results, and clearing only matching credentials.
 
 ## Local failures
 
@@ -92,7 +91,7 @@ stable lowercase values:
 
 | Code | Meaning |
 | --- | --- |
-| `unauthenticated` | A missing session or blocked refresh requires sign-in. |
+| `unauthenticated` | A required session is absent or invalid, or a refresh was blocked. |
 | `invalid_argument` | Invalid input or configuration before sending. |
 | `failed_precondition` | Storage or transport state requires caller action. |
 | `resource_exhausted` | Request, response, or storage capacity exceeded. |

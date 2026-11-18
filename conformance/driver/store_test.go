@@ -54,6 +54,25 @@ func TestSessionStoreRoundTripAndCopy(t *testing.T) {
 	}
 }
 
+func TestEmptySessionStoreCreation(t *testing.T) {
+	empty := map[string]any{"storeRef": "store", "origin": "https://example.test"}
+	read := command("c:read", "session.store.read", map[string]any{"storeRef": "store", "includeTrace": false})
+	bind := command("c:client", "client.create", map[string]any{"clientRef": "client", "origin": "https://example.test", "fixture": "auth", "requestTimeoutMs": 1000, "storeRef": "store"})
+	results, err := execute(t, hello+command("c:store", "session.store.create", empty)+bind+read, "", nil)
+	if err != nil || len(results) != 4 {
+		t.Fatalf("incomplete empty store commands: %v", err)
+	}
+	for _, result := range results {
+		if result.Error != nil {
+			t.Fatalf("empty store command failed: %v", result.Error)
+		}
+	}
+	state := results[3].Result.(map[string]any)
+	if state["present"] != false || state["revision"] != float64(0) || state["accessRef"] != nil || state["refreshRef"] != nil {
+		t.Fatal("new empty store reports credentials or mutations")
+	}
+}
+
 func TestSessionRecordValidation(t *testing.T) {
 	for _, variant := range []string{"missing", "unknown", "case", "empty", "wrong-origin", "wrong-token", "malformed-token"} {
 		t.Run(variant, func(t *testing.T) {

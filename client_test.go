@@ -1,6 +1,7 @@
 package chickinfry
 
 import (
+	"bufio"
 	"context"
 	"crypto/rand"
 	"encoding/base64"
@@ -9,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -648,25 +650,41 @@ func TestHTTPDoesNotClassifyProxyStatusReasonAsMalformed(t *testing.T) {
 }
 
 func TestHTTPAppliesConfiguredTimeout(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
-		time.Sleep(20 * time.Millisecond)
-	}))
-	defer server.Close()
-	transport, err := NewHTTPTransport(server.URL, WithTimeout(time.Millisecond))
-	if err != nil {
-		t.Fatal(err)
-	}
-	err = transport.Invoke(t.Context(), "catalog.create", map[string]string{}, &struct{}{})
-	failure, ok := errors.AsType[*ClientError](err)
-	if !ok || failure.Code != CodeDeadlineExceeded || failure.Status != nil || !failure.OutcomeUnknown {
-		t.Fatal("timeout lost its local classification or transmission state")
-	}
-	if err == nil {
-		t.Fatal("configured timeout was not applied")
-	}
-	if !strings.Contains(err.Error(), "deadline exceeded") && !strings.Contains(err.Error(), "timeout") {
-		t.Fatalf("timeout cause was not classified: %v", err)
-	}
+	synctest.Test(t, func(t *testing.T) {
+		wire, peer := net.Pipe()
+		defer wire.Close()
+		defer peer.Close()
+		transport, err := NewHTTPTransport("http://127.0.0.1", WithTimeout(time.Millisecond))
+		if err != nil {
+			t.Fatal(err)
+		}
+		transport.client.Transport.(*http.Transport).DialContext = func(context.Context, string, string) (net.Conn, error) {
+			return &requestConn{Conn: wire}, nil
+		}
+		received := make(chan error, 1)
+		release := make(chan struct{})
+		defer close(release)
+		go func() {
+			request, err := http.ReadRequest(bufio.NewReader(peer))
+			if err == nil {
+				_, err = io.Copy(io.Discard, request.Body)
+				request.Body.Close()
+			}
+			received <- err
+			<-release
+		}()
+		err = transport.Invoke(t.Context(), "catalog.create", map[string]string{}, &struct{}{})
+		if err := <-received; err != nil {
+			t.Fatalf("request was not written before the timeout: %v", err)
+		}
+		failure, ok := errors.AsType[*ClientError](err)
+		if !ok || failure.Code != CodeDeadlineExceeded || failure.Status != nil || !failure.OutcomeUnknown {
+			t.Fatalf("timeout lost its local classification or transmission state: %v", err)
+		}
+		if !strings.Contains(err.Error(), "deadline exceeded") && !strings.Contains(err.Error(), "timeout") {
+			t.Fatalf("timeout cause was not classified: %v", err)
+		}
+	})
 }
 
 type refreshStore struct {
@@ -1107,7 +1125,7 @@ func TestRefreshFlightPanicNotifiesWaiters(t *testing.T) {
 	<-ctx.waiting
 	close(release)
 	for range 2 {
-		if err := <-results; err == nil || err.Error() != "session refresh failed; sign in again" {
+		if err := <-results; err == nil || err.Error() != "session refresh failed" {
 			t.Fatalf("panic waiter result = %v", err)
 		}
 	}
@@ -1546,31 +1564,72 @@ func isBlockedRefresh(err error) bool {
 	return ok && failure.Code == CodeUnauthenticated && failure.Status == nil && failure.OutcomeUnknown
 }
 
-func TestHTTPMissingSessionDoesNotSend(t *testing.T) {
+func TestHTTPProtectedCallAfterSessionCleared(t *testing.T) {
 	transport, err := NewHTTPTransport("https://api.example.com")
 	if err != nil {
 		t.Fatal(err)
 	}
 	store := new(MemoryStore)
-	credentials := newRefreshStore().Credentials()
-	if err := store.Set(credentials); err != nil {
+	original := newRefreshStore().Credentials()
+	if err := store.Set(original); err != nil {
 		t.Fatal(err)
 	}
 	signed, err := transport.WithSession(store)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Clear(t.Context(), credentials); err != nil {
+	if err := store.Clear(t.Context(), original); err != nil {
 		t.Fatal(err)
 	}
-	signed.client.Transport = responseTransport(func(*http.Request) (*http.Response, error) {
-		t.Fatal("missing session reached the network")
-		return nil, io.EOF
+	login := newRefreshStore().Credentials()
+	login.AccessToken = strings.Repeat("b", 43)
+	login.SessionID = "replacement"
+	requests := 0
+	signed.client.Transport = responseTransport(func(req *http.Request) (*http.Response, error) {
+		requests++
+		if req.URL.Path != "/test.echo" || req.Header.Get("Authorization") != "Bearer "+login.AccessToken {
+			t.Fatal("unexpected operation or credentials")
+		}
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("{}"))}, nil
 	})
 	err = signed.Invoke(t.Context(), "test.echo", struct{}{}, &struct{}{})
 	failure, ok := errors.AsType[*ClientError](err)
+	if requests != 0 || !ok || failure.Code != CodeUnauthenticated || failure.Status != nil || failure.OutcomeUnknown {
+		t.Fatal("empty session was not rejected locally")
+	}
+	if failure.Error() != "session is required" {
+		t.Errorf("unexpected missing session message: %s", failure.Error())
+	}
+	if err := store.Set(login); err != nil {
+		t.Fatal(err)
+	}
+	if err := signed.Invoke(t.Context(), "test.echo", struct{}{}, &struct{}{}); err != nil || requests != 1 {
+		t.Fatalf("new session should succeed on the first request: requests=%d, err=%v", requests, err)
+	}
+}
+
+func TestHTTPIncompleteSessionDoesNotSend(t *testing.T) {
+	transport, err := NewHTTPTransport("https://api.example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := newRefreshStore()
+	signed, err := transport.WithSession(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.credentials.RefreshToken = ""
+	signed.client.Transport = responseTransport(func(*http.Request) (*http.Response, error) {
+		t.Fatal("incomplete session reached the network")
+		return nil, io.EOF
+	})
+	err = signed.InvokePublic(t.Context(), "test.echo", struct{}{}, &struct{}{})
+	failure, ok := errors.AsType[*ClientError](err)
 	if !ok || failure.Code != CodeUnauthenticated || failure.Status != nil || failure.OutcomeUnknown {
-		t.Fatal("missing session lost its local classification")
+		t.Fatal("incomplete session was not rejected locally")
+	}
+	if failure.Error() != "session credentials are invalid" {
+		t.Errorf("unexpected invalid session message: %s", failure.Error())
 	}
 }
 

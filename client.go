@@ -56,6 +56,7 @@ type SessionCredentials struct {
 // SessionStore defines reading, saving, and ending session credentials owned by the caller.
 // Refresh must serialize on the shared session unit, read its latest credentials,
 // and persist successful results before returning. Clear must match expected credentials.
+// Credentials returns the zero value only when the store is empty.
 // MemoryStore provides these storage guarantees in memory.
 // The SDK shares in-flight refreshes across clients bound to the same comparable
 // store value in one process. Non-comparable or non-reflexive values use per-binding
@@ -130,7 +131,7 @@ func (flights *refreshFlights) Do(ctx context.Context, key refreshKey, run func(
 		defer func() {
 			if recover() != nil {
 				unknownRefreshes.Store(sha256.Sum256([]byte(key.token)), struct{}{})
-				flight.err = &ClientError{Code: CodeUnauthenticated, Message: "session refresh failed; sign in again", OutcomeUnknown: true}
+				flight.err = &ClientError{Code: CodeUnauthenticated, Message: "session refresh failed", OutcomeUnknown: true}
 			}
 			flights.mu.Lock()
 			delete(flights.flights, key)
@@ -165,7 +166,7 @@ func (transport *HTTPTransport) WithBearer(token string) (*HTTPTransport, error)
 	return &copy, nil
 }
 
-// WithSession returns a copy that uses the given session store.
+// WithSession returns a copy that uses the given session store, which may be empty.
 // Clients bound to the same comparable store value share one in-flight refresh
 // in this process. Pointer stores share by pointer identity; equal value stores
 // share by value equality. Non-comparable or non-reflexive values (such as values
@@ -178,22 +179,22 @@ func (transport *HTTPTransport) WithSession(store SessionStore) (*HTTPTransport,
 	if transport.refreshes == nil {
 		return nil, &ClientError{Code: CodeFailedPrecondition, Message: "session transport is not initialized"}
 	}
+	memory, isMemory := store.(*MemoryStore)
 	credentials := store.Credentials()
-	if !tokenPattern.MatchString(credentials.AccessToken) || !tokenPattern.MatchString(credentials.RefreshToken) {
-		return nil, &ClientError{Code: CodeUnauthenticated, Message: "session is unavailable; sign in again"}
+	empty := credentials == (SessionCredentials{})
+	if !empty && (!tokenPattern.MatchString(credentials.AccessToken) || !tokenPattern.MatchString(credentials.RefreshToken)) {
+		return nil, &ClientError{Code: CodeUnauthenticated, Message: "session credentials are invalid"}
 	}
-	signed, err := transport.WithBearer(credentials.AccessToken)
-	if err != nil {
-		return nil, err
-	}
+	signed := *transport
+	signed.bearer = ""
 	signed.session = store
 	signed.refreshes = new(refreshFlights)
-	if memory, ok := store.(*MemoryStore); ok {
+	if isMemory {
 		signed.refreshes = &memory.refreshes
 	} else if reflect.ValueOf(store).Comparable() && store == store {
 		signed.refreshes = &customRefreshes
 	}
-	return signed, nil
+	return &signed, nil
 }
 
 // HTTPTransportOption configures an HTTP transport during construction.
@@ -278,7 +279,16 @@ var operationName = regexp.MustCompile(`^[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*$`)
 var errorCode = regexp.MustCompile(`^[a-z_]+$`)
 
 // Invoke calls a single operation with POST and fills output from the response.
-func (transport *HTTPTransport) Invoke(ctx context.Context, operation string, input any, output any) (result error) {
+func (transport *HTTPTransport) Invoke(ctx context.Context, operation string, input any, output any) error {
+	return transport.invoke(ctx, operation, input, output, false)
+}
+
+// InvokePublic calls a declared public operation, sending session credentials when available.
+func (transport *HTTPTransport) InvokePublic(ctx context.Context, operation string, input any, output any) error {
+	return transport.invoke(ctx, operation, input, output, true)
+}
+
+func (transport *HTTPTransport) invoke(ctx context.Context, operation string, input any, output any, public bool) (result error) {
 	ctx, finish, hookErr := conformanceBegin(ctx, transport.origin, transport.session != nil)
 	defer finish()
 	defer func() {
@@ -289,39 +299,81 @@ func (transport *HTTPTransport) Invoke(ctx context.Context, operation string, in
 		return hookErr
 	}
 	if transport.session == nil {
-		return transport.invokeOnce(ctx, operation, input, output, transport.bearer, nil)
+		return transport.invokeOnce(ctx, operation, input, output, transport.bearer, nil, nil)
 	}
-	credentials := transport.session.Credentials()
+	var credentials SessionCredentials
+	var revision uint64
+	memory, inMemory := transport.session.(*MemoryStore)
+	if inMemory {
+		credentials, revision = memory.snapshot()
+	} else {
+		credentials = transport.session.Credentials()
+	}
+
+	var adopt func([]byte, int) error
+	if public && inMemory {
+		switch operation {
+		case "auth.signin", "auth.identity", "auth.verify_email", "auth.signup":
+			adopt = func(data []byte, status int) error {
+				var response refreshResponse
+				err := json.Unmarshal(data, &response)
+				next := SessionCredentials(response)
+				if err == nil && operation == "auth.signup" && next == (SessionCredentials{}) {
+					return nil
+				}
+				if err != nil || !validCredentials(next) {
+					return &ClientError{Code: CodeInternal, Message: "invalid operation response", Status: new(status), OutcomeUnknown: true}
+				}
+				return memory.set(next, &revision)
+			}
+		}
+	}
+	if credentials == (SessionCredentials{}) {
+		if public && operation != "auth.refresh" {
+			return transport.invokeOnce(ctx, operation, input, output, "", nil, adopt)
+		}
+		return &ClientError{Code: CodeUnauthenticated, Message: "session is required"}
+	}
 	if !tokenPattern.MatchString(credentials.AccessToken) || !tokenPattern.MatchString(credentials.RefreshToken) {
-		return &ClientError{Code: CodeUnauthenticated, Message: "session is unavailable; sign in again"}
+		return &ClientError{Code: CodeUnauthenticated, Message: "session credentials are invalid"}
 	}
 	bearer := credentials.AccessToken
 	if operation == "auth.refresh" {
 		bearer = ""
 	}
-	err := transport.invokeOnce(ctx, operation, input, output, bearer, nil)
-	if operation == "auth.refresh" || !isInvalidToken(err) {
-		return err
+	err := transport.invokeOnce(ctx, operation, input, output, bearer, nil, adopt)
+	if operation != "auth.refresh" && isInvalidToken(err) {
+		if hookErr := conformanceBarrier(ctx, "both-originals-rejected", ""); hookErr != nil {
+			return hookErr
+		}
+		credentials, err = transport.refreshSession(ctx, credentials)
+		if err != nil {
+			conformanceRefreshFailure(ctx)
+			return err
+		}
+		if adopt != nil {
+			current, refreshedRevision := memory.snapshot()
+			if current != credentials {
+				return &ClientError{Code: CodeUnauthenticated, Message: "session changed"}
+			}
+			revision = refreshedRevision
+		}
+		err = transport.invokeOnce(ctx, operation, input, output, credentials.AccessToken, nil, adopt)
 	}
-	if hookErr := conformanceBarrier(ctx, "both-originals-rejected", ""); hookErr != nil {
-		return hookErr
+	if err == nil && operation == "auth.logout" {
+		return conformanceClear(context.WithoutCancel(ctx), transport.session, credentials)
 	}
-	credentials, err = transport.refreshSession(ctx, credentials)
-	if err != nil {
-		conformanceRefreshFailure(ctx)
-		return err
-	}
-	return transport.invokeOnce(ctx, operation, input, output, credentials.AccessToken, nil)
+	return err
 }
 
 func (transport *HTTPTransport) refreshSession(ctx context.Context, failed SessionCredentials) (SessionCredentials, error) {
 	current := transport.session.Credentials()
 	if !tokenPattern.MatchString(current.AccessToken) || !tokenPattern.MatchString(current.RefreshToken) {
-		return SessionCredentials{}, &ClientError{Code: CodeUnauthenticated, Message: "session is unavailable; sign in again"}
+		return SessionCredentials{}, &ClientError{Code: CodeUnauthenticated, Message: "session is unavailable"}
 	}
 	if current != failed {
 		if !sameSession(current, failed) {
-			return SessionCredentials{}, &ClientError{Code: CodeUnauthenticated, Message: "session changed; sign in again"}
+			return SessionCredentials{}, &ClientError{Code: CodeUnauthenticated, Message: "session changed"}
 		}
 		return current, nil
 	}
@@ -338,7 +390,7 @@ func (transport *HTTPTransport) refreshSession(ctx context.Context, failed Sessi
 			rejected = latest
 			if latest != failed {
 				if !sameSession(latest, failed) {
-					return SessionCredentials{}, &ClientError{Code: CodeUnauthenticated, Message: "session changed; sign in again"}
+					return SessionCredentials{}, &ClientError{Code: CodeUnauthenticated, Message: "session changed"}
 				}
 				return latest, nil
 			}
@@ -348,7 +400,7 @@ func (transport *HTTPTransport) refreshSession(ctx context.Context, failed Sessi
 				if observed, ok := previous.(*atomic.Bool); ok && observed.Load() {
 					conformanceRefreshBlocked(refreshCtx)
 				}
-				return SessionCredentials{}, &ClientError{Code: CodeUnauthenticated, Message: "refresh outcome is unknown; sign in again", OutcomeUnknown: true}
+				return SessionCredentials{}, &ClientError{Code: CodeUnauthenticated, Message: "refresh outcome is unknown", OutcomeUnknown: true}
 			}
 			refreshCtx = httptrace.WithClientTrace(refreshCtx, &httptrace.ClientTrace{
 				WroteRequest: func(info httptrace.WroteRequestInfo) {
@@ -362,7 +414,7 @@ func (transport *HTTPTransport) refreshSession(ctx context.Context, failed Sessi
 			attempted = true
 			unknownOutcome = true
 			classified := false
-			err := transport.invokeOnce(refreshCtx, "auth.refresh", map[string]string{"refresh_token": latest.RefreshToken}, &response, "", &classified)
+			err := transport.invokeOnce(refreshCtx, "auth.refresh", map[string]string{"refresh_token": latest.RefreshToken}, &response, "", &classified, nil)
 			if err != nil {
 				failure, local := errors.AsType[*ClientError](err)
 				if classified || (local && !failure.OutcomeUnknown) {
@@ -394,10 +446,10 @@ func (transport *HTTPTransport) refreshSession(ctx context.Context, failed Sessi
 	}
 	latest := transport.session.Credentials()
 	if (latest.AccessToken != refreshed.AccessToken || latest.RefreshToken != refreshed.RefreshToken) && !sameSession(latest, refreshed) {
-		return SessionCredentials{}, &ClientError{Code: CodeUnauthenticated, Message: "session changed; sign in again"}
+		return SessionCredentials{}, &ClientError{Code: CodeUnauthenticated, Message: "session changed"}
 	}
 	if !tokenPattern.MatchString(latest.AccessToken) || !tokenPattern.MatchString(latest.RefreshToken) {
-		return SessionCredentials{}, &ClientError{Code: CodeUnauthenticated, Message: "session is unavailable; sign in again", OutcomeUnknown: true}
+		return SessionCredentials{}, &ClientError{Code: CodeUnauthenticated, Message: "session is unavailable", OutcomeUnknown: true}
 	}
 	return latest, nil
 }
@@ -519,7 +571,7 @@ func isMalformedResponse(err error) bool {
 		strings.HasPrefix(message, "malformed MIME header")
 }
 
-func (transport *HTTPTransport) invokeOnce(ctx context.Context, operation string, input any, output any, bearer string, classified *bool) (result error) {
+func (transport *HTTPTransport) invokeOnce(ctx context.Context, operation string, input any, output any, bearer string, classified *bool, adopt func([]byte, int) error) (result error) {
 	if !operationName.MatchString(operation) {
 		return &ClientError{Code: CodeInvalidArgument, Message: "invalid operation name"}
 	}
@@ -646,6 +698,11 @@ func (transport *HTTPTransport) invokeOnce(ctx context.Context, operation string
 	}
 	if refreshed, ok := decoded.Interface().(*refreshResponse); ok && !validCredentials(SessionCredentials(*refreshed)) {
 		return &ClientError{Code: CodeInternal, Message: "invalid operation response", Status: new(response.StatusCode), OutcomeUnknown: true}
+	}
+	if adopt != nil {
+		if err := adopt(data, response.StatusCode); err != nil {
+			return err
+		}
 	}
 	value.Elem().Set(decoded.Elem())
 	return nil

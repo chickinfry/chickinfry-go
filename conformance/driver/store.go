@@ -40,6 +40,12 @@ func (s *server) sessionStore(req request, a args) *Error {
 		return failure("driver", "invalid_reference")
 	}
 	if req.Command != "session.store.read" {
+		if _, err := chickinfry.NewHTTPTransport(store.origin); err != nil {
+			return failure("driver", "invalid_args")
+		}
+	}
+	empty := req.Command == "session.store.create" && a.RecordRef == "" && a.AccessRef == "" && a.RefreshRef == ""
+	if req.Command != "session.store.read" && !empty {
 		record, e := s.credentials.resolve(a.RecordRef)
 		if e != nil {
 			return e
@@ -74,12 +80,11 @@ func (s *server) sessionStore(req request, a args) *Error {
 		if data.Origin != store.origin || data.AccessToken != access || data.RefreshToken != refresh {
 			return failure("driver", "invalid_args")
 		}
-		if _, err := chickinfry.NewHTTPTransport(store.origin); err != nil {
-			return failure("driver", "invalid_args")
-		}
 		if err := store.memory.Set(chickinfry.SessionCredentials{AccessToken: data.AccessToken, RefreshToken: data.RefreshToken, ExpiresAt: data.ExpiresAt, RefreshExpiresAt: data.RefreshExpiresAt, UserID: data.UserID, SessionID: data.SessionID}); err != nil {
 			return failure("driver", "invalid_args")
 		}
+	}
+	if req.Command != "session.store.read" {
 		s.stores[a.StoreRef] = store
 		result := map[string]any{"revision": store.revision()}
 		if req.Command == "session.store.create" {
