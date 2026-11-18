@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/rand"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -1397,29 +1398,49 @@ func TestHTTPBoundsResponseRetentionAndStopsReading(t *testing.T) {
 	}
 }
 
-func TestHTTPUsesHTTP1AgainstHTTP2CapableTLSOrigin(t *testing.T) {
-	var protocol atomic.Int64
-	server := httptest.NewUnstartedServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
-		protocol.Store(int64(request.ProtoMajor))
-		writeRefreshResponse(t, response, http.StatusOK, map[string]string{})
-	}))
-	server.EnableHTTP2 = true
-	server.StartTLS()
-	defer server.Close()
-	transport, err := NewHTTPTransport(server.URL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	owned := transport.client.Transport.(*http.Transport)
-	owned.TLSClientConfig = server.Client().Transport.(*http.Transport).TLSClientConfig.Clone()
-	if err := transport.Invoke(t.Context(), "catalog.create", map[string]string{}, &struct{}{}); err != nil {
-		t.Fatal(err)
-	}
-	if protocol.Load() != 1 {
-		t.Fatalf("negotiated HTTP/%d, want HTTP/1", protocol.Load())
-	}
-	if owned == http.DefaultTransport {
-		t.Fatal("runtime modified the shared default transport")
+func TestHTTPUsesHTTP1OverTLS(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		http2 bool
+	}{
+		{"HTTP2Capable", true},
+		{"HTTP1Only", false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewUnstartedServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+				if request.ProtoMajor != 1 {
+					t.Errorf("request used %s, want HTTP/1.1", request.Proto)
+				}
+				writeRefreshResponse(t, response, http.StatusOK, map[string]string{"value": "ok"})
+			}))
+			if test.http2 {
+				server.EnableHTTP2 = true
+				server.TLS = &tls.Config{NextProtos: []string{"h2", "http/1.1"}}
+			}
+			server.StartTLS()
+			defer server.Close()
+
+			original := http.DefaultTransport
+			standard := &http.Transport{
+				ForceAttemptHTTP2: true,
+				TLSClientConfig:   server.Client().Transport.(*http.Transport).TLSClientConfig.Clone(),
+			}
+			http.DefaultTransport = standard
+			t.Cleanup(func() { http.DefaultTransport = original; standard.CloseIdleConnections() })
+
+			transport, err := NewHTTPTransport(server.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer transport.client.CloseIdleConnections()
+			var output map[string]string
+			if err := transport.Invoke(t.Context(), "catalog.create", struct{}{}, &output); err != nil {
+				t.Fatal(err)
+			}
+			if output["value"] != "ok" {
+				t.Fatalf("unexpected operation response: %v", output)
+			}
+		})
 	}
 }
 

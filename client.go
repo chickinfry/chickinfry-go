@@ -247,6 +247,10 @@ func newHTTP(origin string, options []HTTPTransportOption, observe func(*http.Tr
 	clientTransport := standardTransport.Clone()
 	clientTransport.Protocols = new(http.Protocols)
 	clientTransport.Protocols.SetHTTP1(true)
+	// Clone can carry an HTTP/2 ALPN advertisement into the HTTP/1.1 transport.
+	if clientTransport.TLSClientConfig != nil {
+		clientTransport.TLSClientConfig.NextProtos = []string{"http/1.1"}
+	}
 	dial := clientTransport.DialContext
 	if dial == nil {
 		dial = (&net.Dialer{}).DialContext
