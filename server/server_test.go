@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
 	"os"
 	"reflect"
 	"strings"
@@ -114,10 +113,14 @@ func TestRequestHeadersAndPath(t *testing.T) {
 }
 
 func TestPublicRequestFiltersManuallyConstructedHeaders(t *testing.T) {
-	request := Request{Headers: http.Header{"authorization": {"test"}, "COOKIE": {"test"}, "X-Trace": {"test"}}}
+	request := Request{Headers: Headers{"authorization": {"test"}, "COOKIE": {"test"}, "X-Trace": {"test"}}}
 	public := request.Public()
 	if len(public.Headers) != 1 || public.Headers.Get("X-Trace") != "test" || len(request.Headers) != 3 {
 		t.Fatal("direct context exposed credentials or changed the original headers")
+	}
+	public.Headers["X-Trace"][0] = "changed"
+	if request.Headers.Get("x-trace") != "test" {
+		t.Fatal("public context shares header values with the original request")
 	}
 }
 

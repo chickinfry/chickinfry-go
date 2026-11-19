@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"net/http"
 	"regexp"
 	"slices"
 	"strings"
@@ -50,9 +49,22 @@ type Request struct {
 	RID           int64           `json:"rid"`
 	Method        string          `json:"method"`
 	Path          string          `json:"path"`
-	Headers       http.Header     `json:"headers"`
+	Headers       Headers         `json:"headers"`
 	Body          json.RawMessage `json:"body"`
 	call          func(string, any) ([]byte, error)
+}
+
+// Headers holds the HTTP header values in a request.
+type Headers map[string][]string
+
+// Get returns the first value for a case-insensitive header name.
+func (headers Headers) Get(name string) string {
+	for key, values := range headers {
+		if strings.EqualFold(key, name) && len(values) > 0 {
+			return values[0]
+		}
+	}
+	return ""
 }
 
 // User contains public authenticated identity values.
@@ -69,11 +81,14 @@ func (request Request) Public() Request {
 	request.Authorization = nil
 	request.Cookie = nil
 	request.Authorize = nil
-	request.Headers = request.Headers.Clone()
-	for name := range request.Headers {
-		if strings.EqualFold(name, "Authorization") || strings.EqualFold(name, "Cookie") {
-			delete(request.Headers, name)
+	if request.Headers != nil {
+		headers := make(Headers, len(request.Headers))
+		for name, values := range request.Headers {
+			if !strings.EqualFold(name, "Authorization") && !strings.EqualFold(name, "Cookie") {
+				headers[name] = slices.Clone(values)
+			}
 		}
+		request.Headers = headers
 	}
 	return request
 }
@@ -120,13 +135,6 @@ func Handle(size int32) (status int32) {
 		output = []byte(`{"error":"operation_failed"}`)
 		return 500
 	}
-	headers := make(http.Header, len(request.Headers))
-	for key, values := range request.Headers {
-		for _, value := range values {
-			headers.Add(key, value)
-		}
-	}
-	request.Headers = headers
 	request.call = host.Call
 	value, err := handler(request)
 	if err != nil {
