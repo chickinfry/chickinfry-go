@@ -25,3 +25,5 @@ func supportsBarrierPoint(string) bool { return false }
 func attachHooks(_ *server, ctx, _ context.Context, _, _ string) context.Context {
 	return ctx
 }
+
+func attachRealtimeHooks(ctx context.Context, _ realtimeHooks) context.Context { return ctx }

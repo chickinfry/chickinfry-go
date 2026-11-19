@@ -9,4 +9,6 @@ require (
 	github.com/chickinfry/chickinfry-go v0.0.0-20261011073655-2d8ecd63e4d0
 )
 
+require golang.org/x/net v0.61.0 // indirect
+
 replace github.com/chickinfry/chickinfry-go => ../..

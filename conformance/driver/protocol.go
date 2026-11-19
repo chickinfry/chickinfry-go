@@ -201,6 +201,9 @@ type clientBinding struct {
 }
 
 type server struct {
+	protocol        int
+	realtime        *realtimeTrial
+	realtimeFactory RealtimeFactory
 	writer          io.Writer
 	writeMu         sync.Mutex
 	writeErr        error
@@ -268,7 +271,7 @@ func (s *server) write(message any, id string, arrival context.Context) {
 
 // Run reads protected credentials to EOF before negotiating or accepting calls.
 // Closing control input joins SDK work; the controller owns process-level deadlines.
-func Run(ctx context.Context, input io.Reader, output io.Writer, protected io.Reader, call Call) error {
+func Run(ctx context.Context, input io.Reader, output io.Writer, protected io.Reader, call Call, realtime ...RealtimeFactory) error {
 	refs, err := loadCredentials(protected)
 	if err != nil {
 		return err
@@ -286,6 +289,9 @@ func Run(ctx context.Context, input io.Reader, output io.Writer, protected io.Re
 	}
 	s := &server{writer: output, ctx: ctx, cancel: cancel, call: call, credentials: refs,
 		clients: map[string]*clientBinding{}, stores: map[string]*storeBinding{}, barriers: map[string]*barrier{}, pending: map[string]*barrierPending{}}
+	if len(realtime) != 0 {
+		s.realtimeFactory = realtime[0]
+	}
 	defer func() { clear(s.clients); clear(s.stores); refs.erase() }()
 	r := bufio.NewReader(input)
 	seen := map[string]bool{}
@@ -349,6 +355,9 @@ func Run(ctx context.Context, input io.Reader, output io.Writer, protected io.Re
 	if err != nil {
 		cancel()
 	}
+	if s.realtime != nil {
+		s.realtime.close()
+	}
 	s.workers.Wait()
 	if ctx.Err() != nil && err == nil {
 		err = failure("driver", "deadline_exceeded")
@@ -385,15 +394,20 @@ func (s *server) handshake(req request) error {
 	if !validReference(args.RunID) || args.ProtocolVersions == nil || args.RequiredCapabilities == nil {
 		return failure("driver", "invalid_args")
 	}
-	if !slices.Contains(args.ProtocolVersions, 1) {
+	available := supportedCapabilities()
+	s.protocol = 1
+	if s.realtimeFactory != nil && slices.Contains(args.ProtocolVersions, 2) {
+		s.protocol = 2
+		available = append(available, "realtime-v1")
+	} else if !slices.Contains(args.ProtocolVersions, 1) {
 		return failure("driver", "protocol_mismatch")
 	}
 	for _, capability := range args.RequiredCapabilities {
-		if !slices.Contains(supportedCapabilities(), capability) {
+		if !slices.Contains(available, capability) {
 			return Unimplemented()
 		}
 	}
-	s.reply(req.ID, map[string]any{"protocolVersion": 1, "driverVersion": "1", "capabilities": supportedCapabilities()}, nil)
+	s.reply(req.ID, map[string]any{"protocolVersion": s.protocol, "driverVersion": "1", "capabilities": available}, nil)
 	return nil
 }
 

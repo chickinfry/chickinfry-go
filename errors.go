@@ -11,6 +11,7 @@ type ClientErrorCode string
 // CodeInvalidArgument and the remaining codes classify local SDK failures.
 const (
 	CodeUnauthenticated    ClientErrorCode = "unauthenticated"
+	CodePermissionDenied   ClientErrorCode = "permission_denied"
 	CodeInvalidArgument    ClientErrorCode = "invalid_argument"
 	CodeFailedPrecondition ClientErrorCode = "failed_precondition"
 	CodeResourceExhausted  ClientErrorCode = "resource_exhausted"

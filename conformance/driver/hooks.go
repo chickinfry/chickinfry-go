@@ -121,3 +121,7 @@ func attachHooks(s *server, ctx, control context.Context, callID, caseID string)
 		},
 	})
 }
+
+func attachRealtimeHooks(ctx context.Context, hooks realtimeHooks) context.Context {
+	return chickinfry.ConformanceRealtime(ctx, hooks.endpoint, hooks.point, hooks.dispatch, hooks.inspect)
+}

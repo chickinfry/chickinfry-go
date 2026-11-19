@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"reflect"
 
 	auth "chickinfry-client-auth"
 	plain "chickinfry-client-plain"
@@ -26,10 +27,24 @@ func main() {
 		fmt.Fprintln(os.Stderr, "driver requires a protected credential pipe on descriptor 3")
 		os.Exit(2)
 	}
-	if err := driver.Run(context.Background(), os.Stdin, os.Stdout, protected, call); err != nil {
+	if err := driver.Run(context.Background(), os.Stdin, os.Stdout, protected, call, realtimeFixture); err != nil {
 		fmt.Fprintln(os.Stderr, "driver failed")
 		os.Exit(2)
 	}
+}
+
+func realtimeFixture(transport *chickinfry.HTTPTransport) (*chickinfry.RealtimeClient, func(context.Context) (any, error)) {
+	client := plain.CreateClient(transport)
+	// The protocol-1 generated fixture has no realtime field.
+	field := reflect.Indirect(reflect.ValueOf(client)).FieldByName("Realtime")
+	if !field.IsValid() {
+		return nil, nil
+	}
+	realtime, ok := field.Interface().(*chickinfry.RealtimeClient)
+	if !ok {
+		return nil, nil
+	}
+	return realtime, func(ctx context.Context) (any, error) { return client.Probe.List(ctx, plain.ProbeListInput{}) }
 }
 
 // inputTransport preserves JSON presence that generated string input structs cannot represent.

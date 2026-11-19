@@ -11,6 +11,11 @@ import (
 )
 
 type args struct {
+	Transport    string `json:"transport"`
+	Channel      string `json:"channel"`
+	OnGap        string `json:"onGap"`
+	EventHandler string `json:"eventHandler"`
+	Observation  string `json:"observation"`
 	commonArgs
 	ClientRef        string            `json:"clientRef"`
 	Fixture          string            `json:"fixture"`
@@ -35,7 +40,16 @@ type args struct {
 }
 
 var fields = map[string][]string{
-	"client.create":        {"clientRef", "origin", "storeRef", "bearerRef", "requestTimeoutMs", "fixture"},
+	"realtime.start":            {"clientRef", "channel", "onGap", "eventHandler", "transport"},
+	"realtime.observe":          {"point", "observation"},
+	"realtime.release":          {"point"},
+	"realtime.unsubscribe":      {},
+	"realtime.cancel":           {},
+	"realtime.second-consumer":  {},
+	"realtime.hold-dispatch":    {},
+	"realtime.release-dispatch": {},
+
+	"client.create":        {"clientRef", "origin", "storeRef", "bearerRef", "requestTimeoutMs", "fixture", "transport"},
 	"client.copy":          {"sourceClientRef", "clientRef", "bearerRef"},
 	"client.call":          {"clientRef", "operation", "input", "inputRefs", "outputRefs"},
 	"client.observe":       {"callId", "afterSequence"},
@@ -93,6 +107,12 @@ func (s *server) dispatch(req request) *Error {
 	}
 	if e := s.scope(a.commonArgs); e != nil {
 		return e
+	}
+	if strings.HasPrefix(req.Command, "realtime.") {
+		return s.realtimeCommand(req, a)
+	}
+	if a.Transport != "" && (s.protocol != 2 || a.CaseID != "RT-DX-01" || a.Transport != "plain") {
+		return failure("driver", "invalid_args")
 	}
 	switch req.Command {
 	case "client.create", "client.copy":
@@ -154,6 +174,22 @@ func (s *server) dispatch(req request) *Error {
 		}
 		if err != nil {
 			return normalize(err)
+		}
+		if req.Command == "client.create" && s.protocol == 2 && a.CaseID == "RT-DX-01" {
+			if a.Transport != "plain" || fixture != "plain" || s.realtime != nil {
+				return failure("driver", "invalid_args")
+			}
+			realtime, list := s.realtimeFactory(transport)
+			if realtime == nil {
+				return failure("unimplemented", "unimplemented")
+			}
+			s.realtime = newRealtimeTrial(s.ctx, a.Origin, realtime, list)
+			s.call = func(ctx context.Context, _ *chickinfry.HTTPTransport, operation string, _ json.RawMessage) (any, error) {
+				if operation != "probe.list" {
+					return nil, Unimplemented()
+				}
+				return list(ctx)
+			}
 		}
 		s.clients[a.ClientRef] = &clientBinding{http: transport, fixture: fixture, store: store}
 		result := map[string]any{"clientRef": a.ClientRef}
