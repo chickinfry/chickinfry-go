@@ -46,6 +46,65 @@ func TestAuthenticationFailureCannotReturnSuccess(t *testing.T) {
 	}
 }
 
+func TestSignupRateLimitConfiguration(t *testing.T) {
+	const email = "public@example.test"
+	options := Options{LookupEnv: func(string) (*string, error) { return nil, nil }}
+	read := func(options Options) signupRateLimit {
+		t.Helper()
+		runtime, err := NewWithOptions(database.New(1), Hooks{}, options)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return runtime.signupRateLimit
+	}
+	defaults := read(options)
+	if defaults.subject(email) != email || defaults.max != 10 || defaults.windowSeconds != 900 {
+		t.Fatal("unexpected default signup rate limit")
+	}
+	options.SignupRateLimit = SignupRateLimitOptions{Signal: new("global"), Max: new(1), WindowSeconds: new(2)}
+	declared := read(options)
+	if declared.subject(email) != declared.subject("other@example.test") ||
+		declared.subject(email) == email || declared.max != 1 || declared.windowSeconds != 2 {
+		t.Fatal("declared signup rate limit was not applied")
+	}
+	t.Setenv("AUTH_RATE_LIMITS_SIGNUP_SIGNAL", "email")
+	t.Setenv("AUTH_RATE_LIMITS_SIGNUP_MAX", "2")
+	t.Setenv("AUTH_RATE_LIMITS_SIGNUP_WINDOW_SECONDS", "3")
+	options.LookupEnv = nil
+	overridden := read(options)
+	if overridden.subject(email) != email || overridden.max != 2 || overridden.windowSeconds != 3 {
+		t.Fatal("environment did not override individual declared fields")
+	}
+}
+
+func TestSignupRateLimitRejectsInvalidConfiguration(t *testing.T) {
+	const maxName = "AUTH_RATE_LIMITS_SIGNUP_MAX"
+	noEnv := func(string) (*string, error) { return nil, nil }
+	check := func(options Options, field string) {
+		t.Helper()
+		_, err := NewWithOptions(database.New(1), Hooks{}, options)
+		if err == nil || !strings.Contains(err.Error(), field) || strings.Contains(err.Error(), "fixture-invalid") {
+			t.Fatalf("invalid signup rate limit must return a safe error for %s", field)
+		}
+	}
+	check(Options{SignupRateLimit: SignupRateLimitOptions{Signal: new("fixture-invalid")}, LookupEnv: noEnv},
+		"auth.rate_limits.signup.signal")
+	check(Options{SignupRateLimit: SignupRateLimitOptions{Max: new(0)}, LookupEnv: noEnv},
+		"auth.rate_limits.signup.max")
+	check(Options{SignupRateLimit: SignupRateLimitOptions{WindowSeconds: new(-1)}, LookupEnv: noEnv},
+		"auth.rate_limits.signup.window_seconds")
+	for _, value := range []string{"", "0", " 2", "2\n", "1e2", "2147483648", "fixture-invalid"} {
+		check(Options{LookupEnv: func(name string) (*string, error) {
+			if name == maxName {
+				return new(value), nil
+			}
+			return nil, nil
+		}}, maxName)
+	}
+	check(Options{LookupEnv: func(string) (*string, error) { return nil, errors.New("fixture-invalid") }},
+		"AUTH_RATE_LIMITS_SIGNUP_SIGNAL")
+}
+
 func TestUnavailableAuthenticationOperations(t *testing.T) {
 	for _, path := range []string{"/auth.signup", "/auth.signin", "/auth.unknown"} {
 		t.Run(path, func(t *testing.T) {

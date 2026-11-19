@@ -42,30 +42,48 @@ type Tokens struct {
 
 // Auth owns the private repositories for one live request.
 type Auth struct {
-	connection   *database.Connection
-	db           *private.Database
-	hooks        Hooks
-	policy       SessionPolicy
-	cleanupStart func() (string, error)
+	connection      *database.Connection
+	db              *private.Database
+	hooks           Hooks
+	policy          SessionPolicy
+	signupRateLimit signupRateLimit
+	cleanupStart    func() (string, error)
 }
 
 // New binds the private repositories and generated hook adapter to a request.
 // An omitted policy uses a 30-day idle timeout without an absolute lifetime.
 func New(connection *database.Connection, hooks Hooks, policies ...SessionPolicy) *Auth {
-	policy := SessionPolicy{idleTimeoutSeconds: 2592000}
+	var options Options
 	if len(policies) > 1 {
 		panic("only one session policy is allowed")
 	}
 	if len(policies) == 1 {
-		policy = policies[0]
-		if policy.idleTimeoutSeconds == 0 {
+		options.Session = policies[0]
+		if options.Session.idleTimeoutSeconds == 0 {
 			panic("session policy must be created with NewSessionPolicy")
 		}
 	}
+	auth, err := NewWithOptions(connection, hooks, options)
+	if err != nil {
+		panic(err)
+	}
+	return auth
+}
+
+// NewWithOptions binds the runtime and validates signup limits before database I/O.
+func NewWithOptions(connection *database.Connection, hooks Hooks, options Options) (*Auth, error) {
+	limit, err := resolveSignupRateLimit(options.SignupRateLimit, options.LookupEnv)
+	if err != nil {
+		return nil, err
+	}
+	policy := options.Session
+	if policy.idleTimeoutSeconds == 0 {
+		policy = SessionPolicy{idleTimeoutSeconds: 2592000}
+	}
 	return &Auth{
 		connection: connection, db: private.New(connection), hooks: hooks,
-		policy: policy, cleanupStart: randomCleanupStart,
-	}
+		policy: policy, signupRateLimit: limit, cleanupStart: randomCleanupStart,
+	}, nil
 }
 
 func fail(status int, code string) error     { return &server.OperationError{Status: status, Code: code} }
@@ -154,17 +172,20 @@ func normalizeEmail(value string) (string, error) {
 	return value, nil
 }
 
-func (auth *Auth) rateLimit(action, email string) error {
-	key := private.AppAuthRateLimitsPrimaryKey{Action: action, KeyHash: digest(email)}
+func (auth *Auth) rateLimit(action, subject string, maxAttempts int32, windowSeconds int) error {
+	key := private.AppAuthRateLimitsPrimaryKey{Action: action, KeyHash: digest(subject)}
 	repo := auth.db.AppAuthRateLimits
 	fields := repo.Columns()
+	window := time.Duration(windowSeconds) * time.Second
 	for range 4 {
 		row, err := repo.FindByID(key)
 		if err != nil {
 			return err
 		}
 		if row == nil {
-			_, err = repo.Insert(private.AppAuthRateLimitsInsert{Action: action, KeyHash: key.KeyHash, AttemptCount: 1, ExpiresAt: timestamp(time.Now().Add(900 * time.Second))})
+			_, err = repo.Insert(private.AppAuthRateLimitsInsert{
+				Action: action, KeyHash: key.KeyHash, AttemptCount: 1, ExpiresAt: timestamp(time.Now().Add(window)),
+			})
 			if err == nil {
 				return nil
 			}
@@ -177,13 +198,13 @@ func (auth *Auth) rateLimit(action, email string) error {
 		if err != nil {
 			return err
 		}
-		if !ended && row.AttemptCount >= 10 {
+		if !ended && row.AttemptCount >= maxAttempts {
 			return fail(429, "rate_limited")
 		}
 		count, until := row.AttemptCount+1, row.ExpiresAt
 		if ended {
 			count = 1
-			until = timestamp(time.Now().Add(900 * time.Second))
+			until = timestamp(time.Now().Add(window))
 		}
 		updated, err := repo.UpdateIf(key, orm.And(fields.AttemptCount.Eq(row.AttemptCount), fields.ExpiresAt.Eq(row.ExpiresAt)), private.AppAuthRateLimitsUpdate{AttemptCount: set(count), ExpiresAt: set(until)})
 		if err != nil {
@@ -216,8 +237,11 @@ func (auth *Auth) issue(db *private.Database, user private.AppAuthUsersRow) (Tok
 }
 
 func (auth *Auth) signup(email, password string) (Tokens, error) {
-	if err := auth.rateLimit("signup", email); err != nil {
-		return Tokens{}, err
+	limit := auth.signupRateLimit
+	if limit.signal != "off" {
+		if err := auth.rateLimit("signup", limit.subject(email), limit.max, limit.windowSeconds); err != nil {
+			return Tokens{}, err
+		}
 	}
 	stored, err := hashPassword(password)
 	if err != nil {
@@ -255,7 +279,7 @@ func (auth *Auth) signup(email, password string) (Tokens, error) {
 }
 
 func (auth *Auth) signin(email, password string) (Tokens, error) {
-	if err := auth.rateLimit("signin", email); err != nil {
+	if err := auth.rateLimit("signin", email, 10, 900); err != nil {
 		return Tokens{}, err
 	}
 	repo := auth.db.AppAuthUsers

@@ -178,6 +178,28 @@ Apply the additive authentication migration for `first_login_at` and
 `last_renewed_at` before upgrading the runtime. Valid legacy sessions transition
 on successful refresh; expired or revoked sessions remain rejected.
 
+## Signup rate limit
+
+Pass the normalized `auth.rate_limits.signup` settings as
+`auth.Options.SignupRateLimit` to `auth.NewWithOptions`. Nil fields use the defaults.
+
+| Option | Environment variable | Default |
+| --- | --- | --- |
+| `Signal` | `AUTH_RATE_LIMITS_SIGNUP_SIGNAL` | `email` |
+| `Max` | `AUTH_RATE_LIMITS_SIGNUP_MAX` | 10 |
+| `WindowSeconds` | `AUTH_RATE_LIMITS_SIGNUP_WINDOW_SECONDS` | 900 |
+
+`email` limits each normalized email address independently. `global` shares a
+signup limit across the authentication database. Map `auth.rate_limits.signup: off`
+to `Signal: new("off")` to disable the signup limit. Environment variables override
+individual options. Hosted WASM must supply `auth.Options.LookupEnv` using
+`request.Environment` for allowlisted bindings. A failed lookup returns an
+error. Set the count and window to positive integers
+(up to 2,147,483,647 attempts and 31,536,000 seconds). Environment integers use
+decimal digits without padding. Invalid settings fail before database I/O.
+A full signup bucket returns `rate_limited` (429). Existing buckets retain their
+expiry.
+
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE).
