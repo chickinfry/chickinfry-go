@@ -25,16 +25,20 @@ func TestStorageGetMapsHostResults(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, item := range []struct {
-		name      string
-		response  []byte
-		want      []byte
-		wantError string
-		wantCode  string
+		name       string
+		response   []byte
+		want       []byte
+		wantError  string
+		wantCode   string
+		wantStatus int
 	}{
 		{name: "object", response: append([]byte(`{"value":`), append(encoded, '}')...), want: body},
+		{name: "empty", response: []byte(`{"value":""}`), want: []byte{}},
 		{name: "absent", response: []byte(`{"value":null}`)},
-		{name: "unbound", response: []byte(`{"error":"binding_unavailable"}`), wantCode: "service_unavailable"},
-		{name: "failed", response: []byte(`{"error":"storage_failed"}`), wantError: "storage_failed"},
+		{name: "unbound", response: []byte(`{"error":"binding_unavailable"}`), wantCode: "service_unavailable", wantStatus: 503},
+		{name: "unavailable", response: []byte(`{"error":"service_unavailable"}`), wantCode: "service_unavailable", wantStatus: 503},
+		{name: "inactive", response: []byte(`{"error":"invalid_host_call"}`), wantError: "invalid_host_call"},
+		{name: "failed", response: []byte(`{"error":"storage_failed"}`), wantCode: "operation_failed", wantStatus: 500},
 	} {
 		value, err := NewStorage(storageRequest(item.response, nil), "photos").Get("a/b")
 		if item.wantError != "" {
@@ -45,7 +49,7 @@ func TestStorageGetMapsHostResults(t *testing.T) {
 		}
 		if item.wantCode != "" {
 			failure, ok := errors.AsType[*OperationError](err)
-			if !ok || failure.Status != 503 || failure.Code != item.wantCode {
+			if !ok || failure.Status != item.wantStatus || failure.Code != item.wantCode {
 				t.Fatalf("%s: got %v", item.name, err)
 			}
 			continue
@@ -53,7 +57,7 @@ func TestStorageGetMapsHostResults(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: %v", item.name, err)
 		}
-		if string(value) != string(item.want) {
+		if string(value) != string(item.want) || (value == nil) != (item.want == nil) {
 			t.Fatalf("%s: got %v", item.name, value)
 		}
 	}
@@ -69,6 +73,21 @@ func TestStoragePutRejectsOversizedObject(t *testing.T) {
 	}
 	if err := NewStorage(storageRequest([]byte(`{"error":"binding_unavailable"}`), nil), "photos").Put("k", []byte("x"), "text/plain"); err == nil {
 		t.Fatal("unbound storage accepted")
+	}
+}
+
+func TestStoragePutEncodesEmptyObject(t *testing.T) {
+	called := false
+	request := Request{RID: 3, call: func(port string, input any) ([]byte, error) {
+		called = true
+		data, err := json.Marshal(input)
+		if err != nil || port != "storage" || string(data) != `{"rid":3,"op":"put","name":"photos","key":"empty","content_type":"text/plain","body":""}` {
+			t.Fatalf("invalid storage put frame: %s / %s / %v", port, data, err)
+		}
+		return []byte(`{}`), nil
+	}}
+	if err := NewStorage(request, "photos").Put("empty", nil, "text/plain"); err != nil || !called {
+		t.Fatalf("empty object upload: %v, host called: %t", err, called)
 	}
 }
 

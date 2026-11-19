@@ -67,6 +67,9 @@ func (storage Storage) Put(key string, body []byte, contentType string) error {
 	if len(body) > storageObjectLimit {
 		return errors.New("storage object exceeds the supported 4 MiB limit")
 	}
+	if body == nil {
+		body = []byte{}
+	}
 	response, err := storage.request.call("storage", storagePutQuery{RID: storage.request.RID, Op: "put", Name: storage.name, Key: key, ContentType: contentType, Body: body})
 	if err != nil {
 		return err
@@ -104,10 +107,12 @@ func validStorageKey(key string) error {
 
 func storageFailure(err error) error {
 	if failure, ok := errors.AsType[*host.Error](err); ok {
-		if failure.Code == "binding_unavailable" {
+		switch failure.Code {
+		case "binding_unavailable", "service_unavailable":
 			return &OperationError{Status: 503, Code: "service_unavailable"}
+		case "storage_failed":
+			return &OperationError{Status: 500, Code: "operation_failed"}
 		}
-		return err
 	}
 	return err
 }
