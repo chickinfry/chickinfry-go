@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"reflect"
 	"strings"
@@ -85,6 +86,61 @@ func TestRequestCredentialBoundary(t *testing.T) {
 			var got map[string]*string
 			if err := json.Unmarshal(output, &got); err != nil || !reflect.DeepEqual(got, test.want) {
 				t.Fatal("handler credential boundary mismatch")
+			}
+		})
+	}
+}
+
+func TestRequestHeadersAndPath(t *testing.T) {
+	resetRuntime(t)
+	Register(func(request Request) (any, error) {
+		if request.Path != "/probe.run" || request.Headers.Get("X-Trace") != "trace" ||
+			request.Headers.Get("Authorization") != "Bearer example" || request.Headers.Get("Cookie") != "session=example" {
+			t.Fatal("dispatcher lost request metadata")
+		}
+		public := request.Public()
+		if public.Headers.Get("x-trace") != "trace" || public.Headers.Get("Authorization") != "" || public.Headers.Get("Cookie") != "" {
+			t.Fatal("public request did not retain only non-credential headers")
+		}
+		if request.Headers.Get("Authorization") != "Bearer example" {
+			t.Fatal("filtering changed the dispatcher's original request")
+		}
+		return nil, nil
+	})
+	frame := []byte(`{"rid":1,"method":"POST","path":"/probe.run","headers":{"x-trace":["trace"],"authorization":["Bearer example"],"cookie":["session=example"]},"body_size":2,"body":{}}`)
+	if status := handleFrame(frame); status != 200 {
+		t.Fatalf("request returned %d", status)
+	}
+}
+
+func TestPublicRequestFiltersManuallyConstructedHeaders(t *testing.T) {
+	request := Request{Headers: http.Header{"authorization": {"test"}, "COOKIE": {"test"}, "X-Trace": {"test"}}}
+	public := request.Public()
+	if len(public.Headers) != 1 || public.Headers.Get("X-Trace") != "test" || len(request.Headers) != 3 {
+		t.Fatal("direct context exposed credentials or changed the original headers")
+	}
+}
+
+func TestDispatchOperationErrorDetails(t *testing.T) {
+	for _, test := range []struct {
+		name, code, want   string
+		message            *string
+		fields             []FieldError
+		status, wantStatus int32
+	}{
+		{"explicit", "invalid_input", `{"error":"invalid_input","message":"","fields":[{"path":"items[0].quantity","code":"too_large"}]}`, new(""), []FieldError{{Path: "items[0].quantity", Code: "too_large"}}, 422, 422},
+		{"invalid message", "invalid_input", `{"error":"invalid_input","fields":[{"path":"quantity","code":"too_large"}]}`, new("private\nline"), []FieldError{{Path: "quantity", Code: "too_large"}}, 422, 422},
+		{"invalid field", "invalid_input", `{"error":"invalid_input","message":"Check quantity."}`, new("Check quantity."), []FieldError{{Path: "quantity", Code: "too_large"}, {Path: "items[01]", Code: "bad"}}, 422, 422},
+		{"other code", "conflict", `{"error":"conflict","message":"Busy."}`, new("Busy."), []FieldError{{Path: "quantity", Code: "bad"}}, 409, 409},
+		{"invalid required code", "Private", `{"error":"operation_failed"}`, new("private"), nil, 409, 500},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			resetRuntime(t)
+			Register(func(Request) (any, error) {
+				return nil, NewOperationError(test.code, int(test.status), test.message, test.fields)
+			})
+			if status := handleFrame([]byte(`{"rid":1}`)); status != test.wantStatus || string(output) != test.want {
+				t.Fatalf("response %d %s, want %d %s", status, output, test.wantStatus, test.want)
 			}
 		})
 	}

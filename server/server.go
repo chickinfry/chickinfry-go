@@ -6,19 +6,33 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net/http"
 	"regexp"
 	"slices"
-	"strconv"
 	"strings"
 	"unicode/utf8"
 
+	"github.com/chickinfry/chickinfry-go/internal/errorwire"
 	"github.com/chickinfry/chickinfry-go/server/host"
 )
 
 // OperationError is an explicit application failure safe to return to a caller.
 type OperationError struct {
-	Status int
-	Code   string
+	Code    string
+	Status  int
+	Message *string
+	Fields  []FieldError
+}
+
+// FieldError describes an invalid input at a declared wire path.
+type FieldError struct {
+	Path string `json:"path"`
+	Code string `json:"code"`
+}
+
+// NewOperationError creates a failure with optional public response details.
+func NewOperationError(code string, status int, message *string, fields []FieldError) *OperationError {
+	return &OperationError{Code: code, Status: status, Message: message, Fields: fields}
 }
 
 // Error returns the operation code without adding response details.
@@ -36,6 +50,7 @@ type Request struct {
 	RID           int64           `json:"rid"`
 	Method        string          `json:"method"`
 	Path          string          `json:"path"`
+	Headers       http.Header     `json:"headers"`
 	Body          json.RawMessage `json:"body"`
 	call          func(string, any) ([]byte, error)
 }
@@ -54,6 +69,12 @@ func (request Request) Public() Request {
 	request.Authorization = nil
 	request.Cookie = nil
 	request.Authorize = nil
+	request.Headers = request.Headers.Clone()
+	for name := range request.Headers {
+		if strings.EqualFold(name, "Authorization") || strings.EqualFold(name, "Cookie") {
+			delete(request.Headers, name)
+		}
+	}
 	return request
 }
 
@@ -68,7 +89,8 @@ func Register(value Handler) { handler = value }
 
 // Allocate retains the input buffer until the request completes.
 func Allocate(size int32) *byte {
-	if size <= 0 || size > host.MaxFrame+1024 {
+	const maxRequestMetadata = 64 << 10
+	if size <= 0 || size > host.MaxFrame+maxRequestMetadata {
 		return nil
 	}
 	input = make([]byte, int(size))
@@ -98,16 +120,38 @@ func Handle(size int32) (status int32) {
 		output = []byte(`{"error":"operation_failed"}`)
 		return 500
 	}
+	headers := make(http.Header, len(request.Headers))
+	for key, values := range request.Headers {
+		for _, value := range values {
+			headers.Add(key, value)
+		}
+	}
+	request.Headers = headers
 	request.call = host.Call
 	value, err := handler(request)
 	if err != nil {
 		failure, ok := errors.AsType[*OperationError](err)
 		if errors.Is(err, ErrNotImplemented) {
 			failure = &OperationError{Status: 501, Code: "not_implemented"}
-		} else if !ok || failure == nil || failure.Status < 400 || failure.Status > 599 || failure.Code == "" {
+		} else if !ok || failure == nil || failure.Status < 400 || failure.Status > 599 || !errorwire.ValidCode(failure.Code) {
 			failure = &OperationError{Status: 500, Code: "operation_failed"}
 		}
-		output, _ = json.Marshal(map[string]string{"error": failure.Code})
+		response := struct {
+			Error   string       `json:"error"`
+			Message *string      `json:"message,omitempty"`
+			Fields  []FieldError `json:"fields,omitempty"`
+		}{Error: failure.Code}
+		if failure.Message != nil && errorwire.ValidMessage(*failure.Message) {
+			response.Message = failure.Message
+		}
+		if failure.Code == "invalid_input" && len(failure.Fields) <= errorwire.MaxFields {
+			if !slices.ContainsFunc(failure.Fields, func(field FieldError) bool {
+				return !errorwire.ValidField(field.Path, field.Code)
+			}) {
+				response.Fields = failure.Fields
+			}
+		}
+		output, _ = json.Marshal(response)
 		return int32(failure.Status)
 	}
 	output, err = json.Marshal(value)
@@ -190,7 +234,7 @@ func DecodeInput(data []byte, fields []string, value any) error {
 		return err
 	}
 	var object map[string]json.RawMessage
-	if host.Decode(data, &object) != nil || object == nil || !validUnicodeJSON(data) {
+	if host.Decode(data, &object) != nil || object == nil || !errorwire.ValidUnicodeJSON(data) {
 		return &OperationError{Status: 400, Code: "invalid_input"}
 	}
 	for _, field := range fields {
@@ -326,48 +370,4 @@ func Log(request Request, level, message string, fields map[string]any) {
 		return
 	}
 	_ = host.Envelope(frame, "", nil)
-}
-
-// encoding/json replaces unpaired surrogate escapes; reject them before dispatch.
-func validUnicodeJSON(data []byte) bool {
-	inside := false
-	for i := 0; i < len(data); i++ {
-		if data[i] == '"' {
-			inside = !inside
-			continue
-		}
-		if !inside || data[i] != '\\' {
-			continue
-		}
-		i++
-		if i >= len(data) {
-			return false
-		}
-		if data[i] != 'u' {
-			continue
-		}
-		if i+4 >= len(data) {
-			return false
-		}
-		value, err := strconv.ParseUint(string(data[i+1:i+5]), 16, 16)
-		if err != nil {
-			return false
-		}
-		i += 4
-		if value >= 0xdc00 && value <= 0xdfff {
-			return false
-		}
-		if value < 0xd800 || value > 0xdbff {
-			continue
-		}
-		if i+6 >= len(data) || data[i+1] != '\\' || data[i+2] != 'u' {
-			return false
-		}
-		low, err := strconv.ParseUint(string(data[i+3:i+7]), 16, 16)
-		if err != nil || low < 0xdc00 || low > 0xdfff {
-			return false
-		}
-		i += 6
-	}
-	return true
 }

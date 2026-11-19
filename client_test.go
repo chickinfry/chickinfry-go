@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -111,6 +112,41 @@ func TestHTTPClassifiesInvalidErrorResponses(t *testing.T) {
 			failure, ok := errors.AsType[*OperationError](err)
 			if !ok || failure.Code != test.code || failure.Status != http.StatusBadGateway {
 				t.Fatalf("response classification = %v, want %s / 502", err, test.code)
+			}
+		})
+	}
+}
+
+func TestHTTPOperationErrorPreservesSafeDetails(t *testing.T) {
+	for _, test := range []struct {
+		name, body string
+		message    *string
+		fields     []FieldError
+	}{
+		{"absent", `{"error":"invalid_input"}`, nil, []FieldError{}},
+		{"null", `{"error":"invalid_input","message":null,"fields":null}`, nil, []FieldError{}},
+		{"empty", `{"error":"invalid_input","message":"","fields":[{"path":"items[0].quantity","code":"too_large"}]}`, new(""), []FieldError{{Path: "items[0].quantity", Code: "too_large"}}},
+		{"unsafe message", `{"error":"invalid_input","message":"line\n","fields":[{"path":"quantity","code":"too_large"}]}`, nil, []FieldError{{Path: "quantity", Code: "too_large"}}},
+		{"unpaired surrogate", `{"error":"invalid_input","message":"\ud800"}`, nil, []FieldError{}},
+		{"unsafe fields", `{"error":"invalid_input","message":"Invalid quantity.","fields":[{"path":"quantity","code":"too_large","value":"private"}]}`, new("Invalid quantity."), []FieldError{}},
+		{"duplicate field key", `{"error":"invalid_input","fields":[{"path":"quantity","code":"too_large","code":"required"}]}`, nil, []FieldError{}},
+		{"out of range index", `{"error":"invalid_input","fields":[{"path":"items[4294967296].quantity","code":"too_large"}]}`, nil, []FieldError{}},
+		{"other code", `{"error":"conflict","message":true,"fields":[{"path":"quantity","code":"too_large"}]}`, nil, []FieldError{}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+				response.WriteHeader(http.StatusUnprocessableEntity)
+				fmt.Fprint(response, test.body)
+			}))
+			defer server.Close()
+			transport, err := NewHTTPTransport(server.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = transport.Invoke(t.Context(), "catalog.create", struct{}{}, &struct{}{})
+			failure, ok := errors.AsType[*OperationError](err)
+			if !ok || failure.Status != http.StatusUnprocessableEntity || !reflect.DeepEqual(failure.ResponseMessage, test.message) || !reflect.DeepEqual(failure.Fields, test.fields) {
+				t.Fatalf("unexpected remote operation details: %#v", err)
 			}
 		})
 	}

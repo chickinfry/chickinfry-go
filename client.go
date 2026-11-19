@@ -21,17 +21,62 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
+
+	"github.com/chickinfry/chickinfry-go/internal/errorwire"
 )
 
 // OperationError carries an operation error code and its HTTP status.
 type OperationError struct {
-	Code   string
-	Status int
+	Code            string
+	Status          int
+	ResponseMessage *string
+	Fields          []FieldError
+}
+
+// FieldError describes a receiver-safe validation detail at an input wire path.
+type FieldError struct {
+	Path string
+	Code string
 }
 
 // Error formats the operation failure for reading.
 func (err *OperationError) Error() string {
 	return fmt.Sprintf("operation failed (%s, HTTP %d)", err.Code, err.Status)
+}
+
+func decodeFieldErrors(raw json.RawMessage) []FieldError {
+	var values []json.RawMessage
+	if json.Unmarshal(raw, &values) != nil || len(values) > errorwire.MaxFields {
+		return []FieldError{}
+	}
+	fields := make([]FieldError, 0, len(values))
+	for _, value := range values {
+		decoder := json.NewDecoder(bytes.NewReader(value))
+		if token, err := decoder.Token(); err != nil || token != json.Delim('{') {
+			return []FieldError{}
+		}
+		var field FieldError
+		for decoder.More() {
+			switch key, _ := decoder.Token(); key {
+			case "path":
+				if field.Path != "" || decoder.Decode(&field.Path) != nil || field.Path == "" {
+					return []FieldError{}
+				}
+			case "code":
+				if field.Code != "" || decoder.Decode(&field.Code) != nil || field.Code == "" {
+					return []FieldError{}
+				}
+			default:
+				return []FieldError{}
+			}
+		}
+		if !errorwire.ValidField(field.Path, field.Code) {
+			return []FieldError{}
+		}
+		fields = append(fields, field)
+	}
+	return fields
 }
 
 // HTTPTransport is a transport that invokes operations against a fixed origin.
@@ -682,7 +727,9 @@ func (transport *HTTPTransport) invokeOnce(ctx context.Context, operation string
 	data = data[:size]
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		failure := struct {
-			Error string `json:"error"`
+			Error   string          `json:"error"`
+			Message json.RawMessage `json:"message"`
+			Fields  json.RawMessage `json:"fields"`
 		}{}
 		conformanceDecode(requestCtx)
 		if json.Unmarshal(data, &failure) == nil && errorCode.MatchString(failure.Error) {
@@ -691,7 +738,16 @@ func (transport *HTTPTransport) invokeOnce(ctx context.Context, operation string
 				*classified = true
 			}
 			conformanceRejection(requestCtx, response.StatusCode == http.StatusUnauthorized)
-			return &OperationError{Code: failure.Error, Status: response.StatusCode}
+			var message *string
+			if !utf8.Valid(failure.Message) || !errorwire.ValidUnicodeJSON(failure.Message) ||
+				json.Unmarshal(failure.Message, &message) != nil || message != nil && !errorwire.ValidMessage(*message) {
+				message = nil
+			}
+			fields := []FieldError{}
+			if failure.Error == "invalid_input" {
+				fields = decodeFieldErrors(failure.Fields)
+			}
+			return &OperationError{Code: failure.Error, Status: response.StatusCode, ResponseMessage: message, Fields: fields}
 		}
 		return &ClientError{Code: CodeInternal, Message: "invalid operation response", Status: new(response.StatusCode), OutcomeUnknown: true}
 	}
