@@ -4,24 +4,41 @@ package database
 import (
 	"encoding/json"
 	"errors"
+	"sync/atomic"
 
 	"github.com/chickinfry/chickinfry-go/server/host"
+	"github.com/chickinfry/chickinfry-go/server/internal/authhook"
 )
 
 // Connection retains the request and transaction lifetime.
 type Connection struct {
-	rid    int64
-	lease  int64
-	ended  bool
-	parent *Connection
-	call   func(string, any) ([]byte, error)
+	rid        int64
+	lease      int64
+	ended      bool
+	authClosed *atomic.Bool
+	parent     *Connection
+	call       func(string, any) ([]byte, error)
 }
 
 // New binds a generated database to one active request.
 func New(rid int64) *Connection { return &Connection{rid: rid, call: host.Call} }
 
+// WithAuthHookTransaction binds the generated signup hook for one invocation.
+func WithAuthHookTransaction(transaction authhook.Transaction, run func(*Connection) error) error {
+	rid, lease := transaction.Handles()
+	if rid < 1 || rid > host.MaxHandle || lease < 1 || lease > host.MaxHandle {
+		return errors.New("invalid authentication transaction")
+	}
+	closed := new(atomic.Bool)
+	connection := &Connection{rid: rid, lease: lease, call: host.Call, authClosed: closed}
+	// Revoke copies even when the callback replaces the original connection value.
+	defer closed.Store(true)
+	return run(connection)
+}
+
 func (connection *Connection) active() error {
-	if connection.rid < 1 || connection.rid > host.MaxHandle || connection.ended || connection.parent != nil && connection.parent.ended {
+	if connection.rid < 1 || connection.rid > host.MaxHandle || connection.ended ||
+		connection.parent != nil && connection.parent.ended || connection.authClosed != nil && connection.authClosed.Load() {
 		return errors.New("database connection is inactive")
 	}
 	return nil
@@ -115,4 +132,10 @@ func (connection *Connection) finish(operation string) error {
 
 // Close prevents the generated ORM from starting new calls after request completion.
 // The host owns cancellation and actual PostgreSQL connection cleanup.
-func (connection *Connection) Close() { connection.ended = true }
+func (connection *Connection) Close() {
+	if connection.authClosed != nil {
+		connection.authClosed.Store(true)
+		return
+	}
+	connection.ended = true
+}

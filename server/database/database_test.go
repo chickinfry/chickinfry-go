@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/chickinfry/chickinfry-go/server/host"
+	"github.com/chickinfry/chickinfry-go/server/internal/authhook"
 )
 
 func TestTransactionLifetimeAndUnknownCommit(t *testing.T) {
@@ -86,5 +87,45 @@ func TestCallbackFailureRollsBack(t *testing.T) {
 	}
 	if !reflect.DeepEqual(operations, []string{"begin", "rollback"}) {
 		t.Fatalf("operations: %v", operations)
+	}
+}
+
+func TestAuthHookTransactionOnlyExecutesAndRevokesCopies(t *testing.T) {
+	callbackFailure := errors.New("creating hook failed")
+	var saved, copied *Connection
+	var operations []string
+	err := WithAuthHookTransaction(authhook.NewTransaction(41, 93), func(connection *Connection) error {
+		connection.call = func(port string, input any) ([]byte, error) {
+			frame, err := json.Marshal(input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if port != "db" || string(frame) != `{"rid":41,"op":"exec","lease":93,"sql":"generated","params":[]}` {
+				t.Fatalf("unexpected auth transaction host call: %s %s", port, frame)
+			}
+			operations = append(operations, port)
+			return []byte(`{"rows":[]}`), nil
+		}
+		if err := connection.Transaction(func(*Connection) error { t.Fatal("nested transaction called"); return nil }); err == nil {
+			t.Fatal("borrowed connection accepted a nested transaction")
+		}
+		if _, err := connection.Query("generated", nil); err != nil {
+			t.Fatal(err)
+		}
+		copy := *connection
+		saved, copied = connection, &copy
+		*connection = Connection{}
+		return callbackFailure
+	})
+	if !errors.Is(err, callbackFailure) {
+		t.Fatalf("callback error=%v", err)
+	}
+	for _, connection := range []*Connection{saved, copied} {
+		if _, err := connection.Query("generated", nil); err == nil {
+			t.Fatal("closed auth transaction accepted a query")
+		}
+	}
+	if len(operations) != 1 {
+		t.Fatalf("closing a borrowed callback touched the host: %v", operations)
 	}
 }
