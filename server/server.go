@@ -42,16 +42,17 @@ var ErrNotImplemented error = errors.New("not_implemented")
 
 // Request contains the transport metadata and validated request handle.
 type Request struct {
-	Authorization *string         `json:"authorization"`
-	Cookie        *string         `json:"cookie"`
-	Origin        *string         `json:"origin"`
-	Authorize     json.RawMessage `json:"authorize"`
-	RID           int64           `json:"rid"`
-	Method        string          `json:"method"`
-	Path          string          `json:"path"`
-	Headers       Headers         `json:"headers"`
-	Body          json.RawMessage `json:"body"`
-	call          func(string, any) ([]byte, error)
+	Authorization  *string         `json:"authorization"`
+	Cookie         *string         `json:"cookie"`
+	Origin         *string         `json:"origin"`
+	Authorize      json.RawMessage `json:"authorize"`
+	RID            int64           `json:"rid"`
+	Method         string          `json:"method"`
+	Path           string          `json:"path"`
+	Headers        Headers         `json:"headers"`
+	Body           json.RawMessage `json:"body"`
+	call           func(string, any) ([]byte, error)
+	authentication *requestAuthentication
 }
 
 // Headers holds the HTTP header values in a request.
@@ -81,10 +82,11 @@ func (request Request) Public() Request {
 	request.Authorization = nil
 	request.Cookie = nil
 	request.Authorize = nil
+	request.authentication = nil
 	if request.Headers != nil {
 		headers := make(Headers, len(request.Headers))
 		for name, values := range request.Headers {
-			if !strings.EqualFold(name, "Authorization") && !strings.EqualFold(name, "Cookie") {
+			if !strings.EqualFold(name, "Authorization") && !strings.EqualFold(name, "Proxy-Authorization") && !strings.EqualFold(name, "Cookie") {
 				headers[name] = slices.Clone(values)
 			}
 		}
@@ -127,7 +129,12 @@ func Handle(size int32) (status int32) {
 		return 400
 	}
 	var request Request
-	if err := decodeRequest(input, &request); err != nil || request.RID < 1 || request.RID > host.MaxHandle {
+	err := decodeRequest(input, &request)
+	if errors.Is(err, errInvalidAuthenticationFrame) {
+		output = []byte(`{"error":"operation_failed"}`)
+		return 500
+	}
+	if err != nil || request.RID < 1 || request.RID > host.MaxHandle {
 		output = []byte(`{"error":"invalid_input"}`)
 		return 400
 	}
@@ -197,6 +204,9 @@ func decodeRequest(frame []byte, request *Request) error {
 			raw = frame[start:end]
 		} else {
 			if err := decoder.Decode(&raw); err != nil {
+				if key, ok := name.(string); ok && strings.EqualFold(key, "auth") {
+					return errInvalidAuthenticationFrame
+				}
 				return err
 			}
 			end = decoder.InputOffset()
@@ -211,21 +221,64 @@ func decodeRequest(frame []byte, request *Request) error {
 			// Keep the envelope's protection limit independent of the operation body.
 			metadata := append(bytes.Clone(frame[:start]), "null"...)
 			metadata = append(metadata, frame[end:]...)
-			wire := struct {
-				*Request
-				BodySize json.RawMessage `json:"body_size"`
-			}{Request: request}
-			if err := host.Decode(metadata, &wire); err != nil {
+			if err := decodeRequestMetadata(metadata, request, bodySize); err != nil {
 				return err
-			}
-			if wire.BodySize != nil && bodySize == nil {
-				return errors.New("invalid request body size")
 			}
 			request.Body = raw
 			return nil
 		}
 	}
-	return host.Decode(frame, request)
+	return decodeRequestMetadata(frame, request, nil)
+}
+
+func decodeRequestMetadata(frame []byte, request *Request, bodySize *int64) error {
+	wire := struct {
+		*Request
+		BodySize json.RawMessage `json:"body_size"`
+		Auth     json.RawMessage `json:"auth"`
+	}{Request: request}
+	frameError := host.Decode(frame, &wire)
+	if frameError != nil || wire.Auth != nil {
+		// Inspect keys before values so a truncated auth value can still be classified.
+		decoder := json.NewDecoder(bytes.NewReader(frame))
+		_, _ = decoder.Token() // decodeRequest already checked the opening object.
+		for decoder.More() {
+			token, err := decoder.Token()
+			if err != nil {
+				break
+			}
+			if name, ok := token.(string); ok && strings.EqualFold(name, "auth") && (name != "auth" || frameError != nil) {
+				return errInvalidAuthenticationFrame
+			}
+			var raw json.RawMessage
+			if decoder.Decode(&raw) != nil {
+				break
+			}
+		}
+	}
+	if frameError != nil {
+		return frameError
+	}
+	if wire.BodySize != nil && bodySize == nil {
+		return errors.New("invalid request body size")
+	}
+	if wire.Auth != nil {
+		authentication := decodeAuthenticationFrame(wire.Auth)
+		if authentication == nil {
+			return errInvalidAuthenticationFrame
+		}
+		request.Authorization = nil
+		request.Cookie = nil
+		request.Authorize = nil
+		request.authentication = authentication
+	}
+	for name := range request.Headers {
+		if strings.EqualFold(name, "Proxy-Authorization") ||
+			(request.authentication != nil && (strings.EqualFold(name, "Authorization") || strings.EqualFold(name, "Cookie"))) {
+			delete(request.Headers, name)
+		}
+	}
+	return nil
 }
 
 // Output returns the response buffer; the loader copies it before releasing the instance.

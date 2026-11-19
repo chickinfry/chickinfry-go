@@ -94,7 +94,8 @@ func TestRequestHeadersAndPath(t *testing.T) {
 	resetRuntime(t)
 	Register(func(request Request) (any, error) {
 		if request.Path != "/probe.run" || request.Headers.Get("X-Trace") != "trace" ||
-			request.Headers.Get("Authorization") != "Bearer example" || request.Headers.Get("Cookie") != "session=example" {
+			request.Headers.Get("Authorization") != "Bearer example" || request.Headers.Get("Cookie") != "session=example" ||
+			request.Headers.Get("Proxy-Authorization") != "" {
 			t.Fatal("dispatcher lost request metadata")
 		}
 		public := request.Public()
@@ -106,10 +107,105 @@ func TestRequestHeadersAndPath(t *testing.T) {
 		}
 		return nil, nil
 	})
-	frame := []byte(`{"rid":1,"method":"POST","path":"/probe.run","headers":{"x-trace":["trace"],"authorization":["Bearer example"],"cookie":["session=example"]},"body_size":2,"body":{}}`)
+	frame := []byte(`{"rid":1,"method":"POST","path":"/probe.run","headers":{"x-trace":["trace"],"authorization":["Bearer example"],"cookie":["session=example"],"Proxy-Authorization":["proxy"]},"body_size":2,"body":{}}`)
 	if status := handleFrame(frame); status != 200 {
 		t.Fatalf("request returned %d", status)
 	}
+}
+
+func TestHostAuthenticationMetadata(t *testing.T) {
+	resetRuntime(t)
+	const verified = `{"version":1,"session":{"id":"session-id","user":{"id":"user-id","email":"user@example.test"}}}`
+	for _, test := range []struct {
+		name, metadata string
+		status         int32
+	}{
+		{"verified", `"auth":` + verified, 200},
+		{"anonymous", `"auth":{"version":1,"session":null}`, 200},
+		{"missing session", `"auth":{"version":1}`, 500},
+		{"version", `"auth":{"version":2,"session":null}`, 500},
+		{"null frame", `"auth":null`, 500},
+		{"extra session field", `"auth":{"version":1,"session":{"id":"s","user":{"id":"u","email":"u@example.test"},"expiresAt":"extra"}}`, 500},
+		{"empty id", `"auth":{"version":1,"session":{"id":"s","user":{"id":"","email":"u@example.test"}}}`, 500},
+		{"invalid email type", `"auth":{"version":1,"session":{"id":"s","user":{"id":"u","email":true}}}`, 500},
+		{"duplicate nested key", `"auth":{"version":1,"version":1,"session":null}`, 500},
+		{"noncanonical key", `"Auth":` + verified, 500},
+		{"noncanonical duplicate", `"auth":` + verified + `,"Auth":` + verified, 500},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			called := false
+			Register(func(request Request) (any, error) {
+				called = true
+				session, err := AuthenticationSession(request)
+				var want *Session
+				if test.metadata == `"auth":`+verified {
+					want = &Session{ID: "session-id", User: User{ID: "user-id", Email: "user@example.test"}}
+				}
+				if err != nil || !reflect.DeepEqual(session, want) {
+					t.Fatal("verified request lost its session identity")
+				}
+				if session != nil {
+					session.User.ID = "changed"
+					again, err := AuthenticationSession(request)
+					if err != nil || !reflect.DeepEqual(again, want) {
+						t.Fatal("changing the returned session altered the verified identity")
+					}
+				}
+				if _, err := AuthenticationSession(request.Public()); err == nil {
+					t.Fatal("public request retains internal authentication metadata")
+				}
+				if request.Authorization != nil || request.Cookie != nil || request.Authorize != nil {
+					t.Fatal("verified request retains credentials")
+				}
+				for _, name := range []string{"Authorization", "Cookie", "Proxy-Authorization"} {
+					if request.Headers.Get(name) != "" {
+						t.Fatalf("verified request retains %s", name)
+					}
+				}
+				if request.Headers.Get("X-Trace") != "trace" || string(request.Body) != "invalid JSON" {
+					t.Fatal("verified request lost an ordinary header or raw body bytes")
+				}
+				return nil, nil
+			})
+			frame := []byte(`{"rid":1,"method":"POST","path":"/probe.run","authorization":"Bearer example","cookie":"session=example","authorize":{"id":"foreign"},"headers":{"x-trace":["trace"],"pRoXy-auTHorization":["example"],"authorization":["Bearer example"],"cookie":["session=example"]},"body_size":12,"body":invalid JSON,` + test.metadata + `}`)
+			status := handleFrame(frame)
+			if test.status == 200 {
+				if status != 200 || !called {
+					t.Fatalf("verified request status=%d, called=%t", status, called)
+				}
+				return
+			}
+			requireFailure(t, status, test.status, "operation_failed")
+			if called {
+				t.Fatal("handler called for malformed authentication metadata")
+			}
+		})
+	}
+}
+
+func TestTruncatedHostAuthenticationMetadata(t *testing.T) {
+	resetRuntime(t)
+	Register(func(Request) (any, error) {
+		t.Fatal("handler called for truncated authentication metadata")
+		return nil, nil
+	})
+	for name, frame := range map[string]string{
+		"before body": `{"rid":1,"auth":{"version":`,
+		"after body":  `{"rid":1,"body_size":2,"body":{},"auth":{"version":`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			requireFailure(t, handleFrame([]byte(frame)), 500, "operation_failed")
+		})
+	}
+}
+
+func TestAuthenticationSessionRequiresHostMetadata(t *testing.T) {
+	resetRuntime(t)
+	Register(func(request Request) (any, error) {
+		return AuthenticationSession(request)
+	})
+	status := handleFrame([]byte(`{"rid":1,"authorization":"Bearer example","headers":{"auth":["spoofed"]},"body":{"auth":{"version":1,"session":{"id":"s","user":{"id":"u","email":"u@example.test"}}}}}`))
+	requireFailure(t, status, 500, "operation_failed")
 }
 
 func TestPublicRequestFiltersManuallyConstructedHeaders(t *testing.T) {
