@@ -20,4 +20,16 @@ func TestStrictResponses(t *testing.T) {
 			t.Fatalf("lost host error %s: %v", code, err)
 		}
 	}
+	for _, frame := range []string{`{"error":"Bad_Code","status":403}`, `{"error":"unauthorized_project","status":200}`, `{"error":"unauthorized_project","status":"403"}`, `{"error":"unauthorized_project","status":403,"detail":"x"}`} {
+		var ignored any
+		if err := Envelope([]byte(frame), "value", &ignored); err == nil {
+			t.Errorf("accepted %s", frame)
+		}
+	}
+	var ignored any
+	err := Envelope([]byte(`{"error":"unauthorized_project","status":403}`), "value", &ignored)
+	failure, ok := errors.AsType[*Error](err)
+	if !ok || failure.Status != 403 {
+		t.Fatalf("lost realtime status: %v", err)
+	}
 }

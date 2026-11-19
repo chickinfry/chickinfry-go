@@ -288,6 +288,65 @@ func (auth *Auth) Session(authorization *string) (*server.Session, error) {
 	return result.Session, nil
 }
 
+// RevalidateSession renews a trusted realtime authorization for an issued
+// native session identified by its public session and user identifiers.
+func (auth *Auth) RevalidateSession(sessionID, userID string) (*server.Session, error) {
+	if sessionID == "" || userID == "" {
+		return nil, fail(401, "session_revoked")
+	}
+	sessions := auth.db.AppAuthSessions
+	row, err := sessions.FindByID(private.AppAuthSessionsPrimaryKey{ID: sessionID})
+	if err != nil {
+		return nil, err
+	}
+	if row == nil || row.RevokedAt != nil || row.UserID != userID {
+		return nil, fail(401, "session_revoked")
+	}
+	var result *server.Session
+	err = auth.db.Transaction(func(db *private.Database) error {
+		repo := db.AppAuthSessions
+		locked, err := repo.UpdateIf(private.AppAuthSessionsPrimaryKey{ID: row.ID}, orm.And(repo.Columns().RevokedAt.IsNull(), repo.Columns().UserID.Eq(userID)), private.AppAuthSessionsUpdate{RevokedAt: null[string]()})
+		if err != nil || locked == nil {
+			return err
+		}
+		checked := time.Now()
+		latest, err := latestRefresh(db, locked.ID)
+		if err != nil {
+			return err
+		}
+		lifetime, err := sessionExpiry(checked, auth.policy, *locked, latest)
+		if err != nil {
+			if failure, ok := errors.AsType[*server.OperationError](err); !ok || failure.Status != 401 {
+				return err
+			}
+			_, err = repo.Update(private.AppAuthSessionsPrimaryKey{ID: locked.ID}, private.AppAuthSessionsUpdate{RevokedAt: set(timestamp(checked))})
+			return err
+		}
+		access, err := expiry(locked.ExpiresAt)
+		if err != nil || !access.After(checked) {
+			return err
+		}
+		user, err := db.AppAuthUsers.FindByID(private.AppAuthUsersPrimaryKey{ID: locked.UserID})
+		if err != nil {
+			return err
+		}
+		if user != nil && user.DisabledAt == nil && user.SessionVersion == locked.UserSessionVersion {
+			if lifetime.expiresAt.Before(access) {
+				access = lifetime.expiresAt
+			}
+			result = &server.Session{ID: locked.ID, User: server.User{ID: user.ID, Email: user.Email}}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	if result == nil {
+		return nil, fail(401, "session_revoked")
+	}
+	return result, nil
+}
+
 type sessionInfo struct {
 	*server.Session
 	expiresAt string
@@ -512,7 +571,7 @@ func (auth *Auth) Handle(request server.Request, emailPassword bool) (any, error
 	}
 	if err := auth.cleanup(now()); err != nil {
 		recordCleanup("failed")
-		_ = request.Log("warn", "Authentication cleanup failed.")
+		server.Log(request, "warn", "Authentication cleanup failed.", nil)
 	}
 	return result, nil
 }

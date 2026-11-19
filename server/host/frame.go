@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"strings"
 	"unicode/utf8"
 )
 
@@ -13,7 +14,10 @@ const MaxFrame = 4 << 20
 const MaxHandle = 1<<53 - 1
 
 // Error preserves a sanitized host error, including SQLSTATE and commit_unknown.
-type Error struct{ Code string }
+type Error struct {
+	Code   string
+	Status int
+}
 
 func (err *Error) Error() string { return err.Code }
 
@@ -73,7 +77,15 @@ func unique(decoder *json.Decoder, depth int) error {
 
 // Envelope checks the exact response shape before decoding its payload.
 func Envelope(frame []byte, field string, output any) error {
-	if len(frame) > MaxFrame {
+	return EnvelopeLimit(frame, field, output, MaxFrame)
+}
+
+// EnvelopeLimit applies Envelope within an operation-specific frame budget.
+func EnvelopeLimit(frame []byte, field string, output any, limit int) error {
+	if limit != MaxFrame && limit != StorageFrame {
+		return errors.New("invalid host frame limit")
+	}
+	if len(frame) > limit {
 		return errors.New("host response too large")
 	}
 	var object map[string]json.RawMessage
@@ -82,10 +94,18 @@ func Envelope(frame []byte, field string, output any) error {
 	}
 	if value, ok := object["error"]; ok {
 		var code string
-		if len(object) != 1 || json.Unmarshal(value, &code) != nil || !validError(code) {
+		if json.Unmarshal(value, &code) != nil || !validError(code) {
 			return errors.New("invalid host error")
 		}
-		return &Error{Code: code}
+		failure := &Error{Code: code}
+		if raw, exists := object["status"]; exists {
+			if len(object) != 2 || json.Unmarshal(raw, &failure.Status) != nil || failure.Status < 400 || failure.Status > 599 {
+				return errors.New("invalid host error")
+			}
+		} else if len(object) != 1 {
+			return errors.New("invalid host error")
+		}
+		return failure
 	}
 	if field == "" {
 		if len(object) != 0 {
@@ -102,7 +122,11 @@ func Envelope(frame []byte, field string, output any) error {
 
 func validError(code string) bool {
 	switch code {
-	case "database_failed", "commit_unknown", "invalid_host_call", "binding_unavailable", "log_failed":
+	case "database_failed", "commit_unknown", "invalid_host_call", "binding_unavailable", "log_failed", "storage_failed", "service_unavailable":
+		return true
+	}
+	// Realtime port errors carry validated public operation codes.
+	if len(code) >= 1 && len(code) <= 64 && strings.Trim(code, "abcdefghijklmnopqrstuvwxyz_") == "" {
 		return true
 	}
 	if len(code) != 5 {
@@ -116,13 +140,21 @@ func validError(code string) bool {
 	return true
 }
 
+// StorageFrame is the extended frame budget of the storage port; object bytes
+// are base64-encoded inside JSON, so a 4 MiB object needs transport headroom.
+const StorageFrame = MaxFrame * 2
+
 // Call sends one frame through the selected host binding.
 func Call(name string, input any) ([]byte, error) {
 	frame, err := json.Marshal(input)
 	if err != nil {
 		return nil, err
 	}
-	if len(frame) == 0 || len(frame) > MaxFrame {
+	limit := MaxFrame
+	if name == "storage" {
+		limit = StorageFrame
+	}
+	if len(frame) == 0 || len(frame) > limit {
 		return nil, errors.New("invalid host frame size")
 	}
 	return exchange(name, frame)

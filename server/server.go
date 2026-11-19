@@ -5,11 +5,11 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"regexp"
 	"slices"
 	"strconv"
+	"strings"
 	"unicode/utf8"
 
 	"github.com/chickinfry/chickinfry-go/server/host"
@@ -31,6 +31,8 @@ var ErrNotImplemented error = errors.New("not_implemented")
 type Request struct {
 	Authorization *string         `json:"authorization"`
 	Cookie        *string         `json:"cookie"`
+	Origin        *string         `json:"origin"`
+	Authorize     json.RawMessage `json:"authorize"`
 	RID           int64           `json:"rid"`
 	Method        string          `json:"method"`
 	Path          string          `json:"path"`
@@ -51,6 +53,7 @@ type Session struct {
 func (request Request) Public() Request {
 	request.Authorization = nil
 	request.Cookie = nil
+	request.Authorize = nil
 	return request
 }
 
@@ -269,8 +272,8 @@ func ValidUUID(value string) bool {
 	return uuidPattern.MatchString(value)
 }
 
-// Environment reads an explicitly allowed logical binding.
-func (request Request) Environment(name string) (*string, error) {
+// binding reads one allowlisted host environment value.
+func (request Request) binding(name string) (*string, error) {
 	frame, err := request.call("env", struct {
 		RID  int64  `json:"rid"`
 		Name string `json:"name"`
@@ -283,20 +286,46 @@ func (request Request) Environment(name string) (*string, error) {
 	return value, err
 }
 
-// Log hands a message to the request's host logging policy.
-func (request Request) Log(level, message string) error {
-	if !slices.Contains([]string{"debug", "info", "warn", "error"}, level) {
-		return fmt.Errorf("invalid log level")
+// Environment reads an explicitly allowed logical binding. Platform-reserved
+// names are not part of the public environment surface.
+func (request Request) Environment(name string) (*string, error) {
+	if strings.HasPrefix(name, "CHIK_") {
+		return nil, &host.Error{Code: "binding_unavailable"}
+	}
+	return request.binding(name)
+}
+
+// Secret reads a declared secret binding, failing closed when it is absent.
+func (request Request) Secret(name string) (string, error) {
+	value, err := request.Environment(name)
+	if err != nil {
+		if failure, ok := errors.AsType[*host.Error](err); ok && failure.Code == "binding_unavailable" {
+			return "", &OperationError{Status: 503, Code: "service_unavailable"}
+		}
+		return "", err
+	}
+	if value == nil || *value == "" {
+		return "", &OperationError{Status: 503, Code: "service_unavailable"}
+	}
+	return *value, nil
+}
+
+// Log hands a record to the request's host logging policy. Invalid records
+// are dropped; logging never fails the request.
+func Log(request Request, level, message string, fields map[string]any) {
+	if request.call == nil || !slices.Contains([]string{"debug", "info", "warn", "error"}, level) {
+		return
 	}
 	frame, err := request.call("log", struct {
-		RID     int64  `json:"rid"`
-		Level   string `json:"level"`
-		Message string `json:"message"`
-	}{request.RID, level, message})
+		RID     int64          `json:"rid"`
+		Level   string         `json:"level"`
+		Message string         `json:"message"`
+		Fields  map[string]any `json:"fields,omitempty"`
+	}{request.RID, level, message, fields})
 	if err != nil {
-		return err
+		return
 	}
-	return host.Envelope(frame, "", nil)
+	_ = host.Envelope(frame, "", nil)
 }
 
 // encoding/json replaces unpaired surrogate escapes; reject them before dispatch.
