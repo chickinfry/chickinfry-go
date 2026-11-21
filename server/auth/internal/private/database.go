@@ -12,6 +12,7 @@ import (
 type Database struct {
 	connection            *database.Connection
 	AppAuthActionTokens   AppAuthActionTokensRepository
+	AppAuthDeviceRequests AppAuthDeviceRequestsRepository
 	AppAuthIdentities     AppAuthIdentitiesRepository
 	AppAuthInvites        AppAuthInvitesRepository
 	AppAuthMigrations     AppAuthMigrationsRepository
@@ -25,6 +26,7 @@ type Database struct {
 func New(connection *database.Connection) *Database {
 	return &Database{connection: connection,
 		AppAuthActionTokens:   AppAuthActionTokensRepository{orm.Repository{Connection: connection, Table: appAuthActionTokensTable}},
+		AppAuthDeviceRequests: AppAuthDeviceRequestsRepository{orm.Repository{Connection: connection, Table: appAuthDeviceRequestsTable}},
 		AppAuthIdentities:     AppAuthIdentitiesRepository{orm.Repository{Connection: connection, Table: appAuthIdentitiesTable}},
 		AppAuthInvites:        AppAuthInvitesRepository{orm.Repository{Connection: connection, Table: appAuthInvitesTable}},
 		AppAuthMigrations:     AppAuthMigrationsRepository{orm.Repository{Connection: connection, Table: appAuthMigrationsTable}},
@@ -449,6 +451,545 @@ func (repository AppAuthActionTokensRepository) Delete(key AppAuthActionTokensPr
 		return nil, err
 	}
 	value, err := orm.DecodeRow[AppAuthActionTokensRow](row, appAuthActionTokensTable)
+	if err != nil {
+		return nil, err
+	}
+	return &value, nil
+}
+
+var appAuthDeviceRequestsTable = orm.Table{Name: "app_auth_device_requests", Primary: []string{"id"}, Columns: []orm.Column{
+	{Name: "approved_at", Kind: "timestamp", Nullable: true, Optional: true, Primary: false},
+	{Name: "consumed_at", Kind: "timestamp", Nullable: true, Optional: true, Primary: false},
+	{Name: "created_at", Kind: "timestamp", Nullable: false, Optional: true, Primary: false},
+	{Name: "device_code_hash", Kind: "string", Nullable: false, Optional: false, Primary: false},
+	{Name: "device_name", Kind: "string", Nullable: true, Optional: true, Primary: false},
+	{Name: "expires_at", Kind: "timestamp", Nullable: false, Optional: false, Primary: false},
+	{Name: "id", Kind: "id", Nullable: false, Optional: true, Primary: true},
+	{Name: "last_polled_at", Kind: "timestamp", Nullable: true, Optional: true, Primary: false},
+	{Name: "status", Kind: "string", Nullable: false, Optional: true, Primary: false},
+	{Name: "user_code_hash", Kind: "string", Nullable: false, Optional: false, Primary: false},
+	{Name: "user_id", Kind: "id", Nullable: true, Optional: true, Primary: false},
+}}
+
+type AppAuthDeviceRequestsRow struct {
+	ApprovedAt     *string `json:"approved_at"`
+	ConsumedAt     *string `json:"consumed_at"`
+	CreatedAt      string  `json:"created_at"`
+	DeviceCodeHash string  `json:"device_code_hash"`
+	DeviceName     *string `json:"device_name"`
+	ExpiresAt      string  `json:"expires_at"`
+	ID             string  `json:"id"`
+	LastPolledAt   *string `json:"last_polled_at"`
+	Status         string  `json:"status"`
+	UserCodeHash   string  `json:"user_code_hash"`
+	UserID         *string `json:"user_id"`
+}
+
+type AppAuthDeviceRequestsInsert struct {
+	ApprovedAt     orm.Optional[string]
+	ConsumedAt     orm.Optional[string]
+	CreatedAt      orm.Optional[string]
+	DeviceCodeHash string
+	DeviceName     orm.Optional[string]
+	ExpiresAt      string
+	ID             orm.Optional[string]
+	LastPolledAt   orm.Optional[string]
+	Status         orm.Optional[string]
+	UserCodeHash   string
+	UserID         orm.Optional[string]
+}
+
+// AppAuthDeviceRequestsUpsert requires every primary key, including keys with defaults.
+type AppAuthDeviceRequestsUpsert struct {
+	ApprovedAt     orm.Optional[string]
+	ConsumedAt     orm.Optional[string]
+	CreatedAt      orm.Optional[string]
+	DeviceCodeHash string
+	DeviceName     orm.Optional[string]
+	ExpiresAt      string
+	ID             string
+	LastPolledAt   orm.Optional[string]
+	Status         orm.Optional[string]
+	UserCodeHash   string
+	UserID         orm.Optional[string]
+}
+
+type AppAuthDeviceRequestsUpdate struct {
+	ApprovedAt     orm.Optional[string]
+	ConsumedAt     orm.Optional[string]
+	CreatedAt      orm.Optional[string]
+	DeviceCodeHash orm.Optional[string]
+	DeviceName     orm.Optional[string]
+	ExpiresAt      orm.Optional[string]
+	LastPolledAt   orm.Optional[string]
+	Status         orm.Optional[string]
+	UserCodeHash   orm.Optional[string]
+	UserID         orm.Optional[string]
+}
+
+// AppAuthDeviceRequestsIncrement selects mutable integer columns and their nonzero amounts.
+type AppAuthDeviceRequestsIncrement struct {
+}
+
+type AppAuthDeviceRequestsPrimaryKey struct {
+	ID string
+}
+
+type AppAuthDeviceRequestsColumns struct {
+	ApprovedAt     orm.Field[string]
+	ConsumedAt     orm.Field[string]
+	CreatedAt      orm.Field[string]
+	DeviceCodeHash orm.Field[string]
+	DeviceName     orm.Field[string]
+	ExpiresAt      orm.Field[string]
+	ID             orm.Field[string]
+	LastPolledAt   orm.Field[string]
+	Status         orm.Field[string]
+	UserCodeHash   orm.Field[string]
+	UserID         orm.Field[string]
+}
+
+type AppAuthDeviceRequestsRepository struct{ repository orm.Repository }
+
+func (repository AppAuthDeviceRequestsRepository) Columns() AppAuthDeviceRequestsColumns {
+	return AppAuthDeviceRequestsColumns{
+		ApprovedAt:     orm.Field[string]{Name: "approved_at"},
+		ConsumedAt:     orm.Field[string]{Name: "consumed_at"},
+		CreatedAt:      orm.Field[string]{Name: "created_at"},
+		DeviceCodeHash: orm.Field[string]{Name: "device_code_hash"},
+		DeviceName:     orm.Field[string]{Name: "device_name"},
+		ExpiresAt:      orm.Field[string]{Name: "expires_at"},
+		ID:             orm.Field[string]{Name: "id"},
+		LastPolledAt:   orm.Field[string]{Name: "last_polled_at"},
+		Status:         orm.Field[string]{Name: "status"},
+		UserCodeHash:   orm.Field[string]{Name: "user_code_hash"},
+		UserID:         orm.Field[string]{Name: "user_id"},
+	}
+}
+
+func (repository AppAuthDeviceRequestsRepository) Insert(input AppAuthDeviceRequestsInsert) (AppAuthDeviceRequestsRow, error) {
+	values := map[string]any{}
+	if input.ApprovedAt.Set {
+		if input.ApprovedAt.Null {
+			values["approved_at"] = nil
+		} else {
+			values["approved_at"] = input.ApprovedAt.Value
+		}
+	}
+	if input.ConsumedAt.Set {
+		if input.ConsumedAt.Null {
+			values["consumed_at"] = nil
+		} else {
+			values["consumed_at"] = input.ConsumedAt.Value
+		}
+	}
+	if input.CreatedAt.Set {
+		if input.CreatedAt.Null {
+			values["created_at"] = nil
+		} else {
+			values["created_at"] = input.CreatedAt.Value
+		}
+	}
+	values["device_code_hash"] = input.DeviceCodeHash
+	if input.DeviceName.Set {
+		if input.DeviceName.Null {
+			values["device_name"] = nil
+		} else {
+			values["device_name"] = input.DeviceName.Value
+		}
+	}
+	values["expires_at"] = input.ExpiresAt
+	if input.ID.Set {
+		if input.ID.Null {
+			values["id"] = nil
+		} else {
+			values["id"] = input.ID.Value
+		}
+	}
+	if input.LastPolledAt.Set {
+		if input.LastPolledAt.Null {
+			values["last_polled_at"] = nil
+		} else {
+			values["last_polled_at"] = input.LastPolledAt.Value
+		}
+	}
+	if input.Status.Set {
+		if input.Status.Null {
+			values["status"] = nil
+		} else {
+			values["status"] = input.Status.Value
+		}
+	}
+	values["user_code_hash"] = input.UserCodeHash
+	if input.UserID.Set {
+		if input.UserID.Null {
+			values["user_id"] = nil
+		} else {
+			values["user_id"] = input.UserID.Value
+		}
+	}
+	row, err := repository.repository.Insert(values)
+	if err != nil {
+		return AppAuthDeviceRequestsRow{}, err
+	}
+	return orm.DecodeRow[AppAuthDeviceRequestsRow](row, appAuthDeviceRequestsTable)
+}
+
+// Upsert inserts or updates supplied mutable columns on the complete primary key.
+func (repository AppAuthDeviceRequestsRepository) Upsert(input AppAuthDeviceRequestsUpsert) (AppAuthDeviceRequestsRow, error) {
+	values := map[string]any{}
+	if input.ApprovedAt.Set {
+		if input.ApprovedAt.Null {
+			values["approved_at"] = nil
+		} else {
+			values["approved_at"] = input.ApprovedAt.Value
+		}
+	}
+	if input.ConsumedAt.Set {
+		if input.ConsumedAt.Null {
+			values["consumed_at"] = nil
+		} else {
+			values["consumed_at"] = input.ConsumedAt.Value
+		}
+	}
+	if input.CreatedAt.Set {
+		if input.CreatedAt.Null {
+			values["created_at"] = nil
+		} else {
+			values["created_at"] = input.CreatedAt.Value
+		}
+	}
+	values["device_code_hash"] = input.DeviceCodeHash
+	if input.DeviceName.Set {
+		if input.DeviceName.Null {
+			values["device_name"] = nil
+		} else {
+			values["device_name"] = input.DeviceName.Value
+		}
+	}
+	values["expires_at"] = input.ExpiresAt
+	values["id"] = input.ID
+	if input.LastPolledAt.Set {
+		if input.LastPolledAt.Null {
+			values["last_polled_at"] = nil
+		} else {
+			values["last_polled_at"] = input.LastPolledAt.Value
+		}
+	}
+	if input.Status.Set {
+		if input.Status.Null {
+			values["status"] = nil
+		} else {
+			values["status"] = input.Status.Value
+		}
+	}
+	values["user_code_hash"] = input.UserCodeHash
+	if input.UserID.Set {
+		if input.UserID.Null {
+			values["user_id"] = nil
+		} else {
+			values["user_id"] = input.UserID.Value
+		}
+	}
+	row, err := repository.repository.Upsert(values)
+	if err != nil {
+		return AppAuthDeviceRequestsRow{}, err
+	}
+	return orm.DecodeRow[AppAuthDeviceRequestsRow](row, appAuthDeviceRequestsTable)
+}
+
+func (repository AppAuthDeviceRequestsRepository) FindByID(key AppAuthDeviceRequestsPrimaryKey) (*AppAuthDeviceRequestsRow, error) {
+	row, err := repository.repository.FindByID(map[string]any{"id": key.ID})
+	if err != nil || row == nil {
+		return nil, err
+	}
+	value, err := orm.DecodeRow[AppAuthDeviceRequestsRow](row, appAuthDeviceRequestsTable)
+	if err != nil {
+		return nil, err
+	}
+	return &value, nil
+}
+
+func (repository AppAuthDeviceRequestsRepository) FindMany(options orm.FindMany) ([]AppAuthDeviceRequestsRow, error) {
+	rows, err := repository.repository.FindMany(options)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]AppAuthDeviceRequestsRow, 0, len(rows))
+	for _, row := range rows {
+		value, err := orm.DecodeRow[AppAuthDeviceRequestsRow](row, appAuthDeviceRequestsTable)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, value)
+	}
+	return result, nil
+}
+
+func (repository AppAuthDeviceRequestsRepository) Update(key AppAuthDeviceRequestsPrimaryKey, patch AppAuthDeviceRequestsUpdate) (AppAuthDeviceRequestsRow, error) {
+	values := map[string]any{}
+	if patch.ApprovedAt.Set {
+		if patch.ApprovedAt.Null {
+			values["approved_at"] = nil
+		} else {
+			values["approved_at"] = patch.ApprovedAt.Value
+		}
+	}
+	if patch.ConsumedAt.Set {
+		if patch.ConsumedAt.Null {
+			values["consumed_at"] = nil
+		} else {
+			values["consumed_at"] = patch.ConsumedAt.Value
+		}
+	}
+	if patch.CreatedAt.Set {
+		if patch.CreatedAt.Null {
+			values["created_at"] = nil
+		} else {
+			values["created_at"] = patch.CreatedAt.Value
+		}
+	}
+	if patch.DeviceCodeHash.Set {
+		if patch.DeviceCodeHash.Null {
+			values["device_code_hash"] = nil
+		} else {
+			values["device_code_hash"] = patch.DeviceCodeHash.Value
+		}
+	}
+	if patch.DeviceName.Set {
+		if patch.DeviceName.Null {
+			values["device_name"] = nil
+		} else {
+			values["device_name"] = patch.DeviceName.Value
+		}
+	}
+	if patch.ExpiresAt.Set {
+		if patch.ExpiresAt.Null {
+			values["expires_at"] = nil
+		} else {
+			values["expires_at"] = patch.ExpiresAt.Value
+		}
+	}
+	if patch.LastPolledAt.Set {
+		if patch.LastPolledAt.Null {
+			values["last_polled_at"] = nil
+		} else {
+			values["last_polled_at"] = patch.LastPolledAt.Value
+		}
+	}
+	if patch.Status.Set {
+		if patch.Status.Null {
+			values["status"] = nil
+		} else {
+			values["status"] = patch.Status.Value
+		}
+	}
+	if patch.UserCodeHash.Set {
+		if patch.UserCodeHash.Null {
+			values["user_code_hash"] = nil
+		} else {
+			values["user_code_hash"] = patch.UserCodeHash.Value
+		}
+	}
+	if patch.UserID.Set {
+		if patch.UserID.Null {
+			values["user_id"] = nil
+		} else {
+			values["user_id"] = patch.UserID.Value
+		}
+	}
+	row, err := repository.repository.Update(map[string]any{"id": key.ID}, values)
+	if err != nil {
+		return AppAuthDeviceRequestsRow{}, err
+	}
+	return orm.DecodeRow[AppAuthDeviceRequestsRow](row, appAuthDeviceRequestsTable)
+}
+
+func (repository AppAuthDeviceRequestsRepository) UpdateIf(key AppAuthDeviceRequestsPrimaryKey, condition orm.Filter, patch AppAuthDeviceRequestsUpdate) (*AppAuthDeviceRequestsRow, error) {
+	values := map[string]any{}
+	if patch.ApprovedAt.Set {
+		if patch.ApprovedAt.Null {
+			values["approved_at"] = nil
+		} else {
+			values["approved_at"] = patch.ApprovedAt.Value
+		}
+	}
+	if patch.ConsumedAt.Set {
+		if patch.ConsumedAt.Null {
+			values["consumed_at"] = nil
+		} else {
+			values["consumed_at"] = patch.ConsumedAt.Value
+		}
+	}
+	if patch.CreatedAt.Set {
+		if patch.CreatedAt.Null {
+			values["created_at"] = nil
+		} else {
+			values["created_at"] = patch.CreatedAt.Value
+		}
+	}
+	if patch.DeviceCodeHash.Set {
+		if patch.DeviceCodeHash.Null {
+			values["device_code_hash"] = nil
+		} else {
+			values["device_code_hash"] = patch.DeviceCodeHash.Value
+		}
+	}
+	if patch.DeviceName.Set {
+		if patch.DeviceName.Null {
+			values["device_name"] = nil
+		} else {
+			values["device_name"] = patch.DeviceName.Value
+		}
+	}
+	if patch.ExpiresAt.Set {
+		if patch.ExpiresAt.Null {
+			values["expires_at"] = nil
+		} else {
+			values["expires_at"] = patch.ExpiresAt.Value
+		}
+	}
+	if patch.LastPolledAt.Set {
+		if patch.LastPolledAt.Null {
+			values["last_polled_at"] = nil
+		} else {
+			values["last_polled_at"] = patch.LastPolledAt.Value
+		}
+	}
+	if patch.Status.Set {
+		if patch.Status.Null {
+			values["status"] = nil
+		} else {
+			values["status"] = patch.Status.Value
+		}
+	}
+	if patch.UserCodeHash.Set {
+		if patch.UserCodeHash.Null {
+			values["user_code_hash"] = nil
+		} else {
+			values["user_code_hash"] = patch.UserCodeHash.Value
+		}
+	}
+	if patch.UserID.Set {
+		if patch.UserID.Null {
+			values["user_id"] = nil
+		} else {
+			values["user_id"] = patch.UserID.Value
+		}
+	}
+	row, err := repository.repository.UpdateIf(map[string]any{"id": key.ID}, condition, values)
+	if err != nil || row == nil {
+		return nil, err
+	}
+	value, err := orm.DecodeRow[AppAuthDeviceRequestsRow](row, appAuthDeviceRequestsTable)
+	if err != nil {
+		return nil, err
+	}
+	return &value, nil
+}
+
+// Increment atomically adds amounts or returns not_found for a missing row.
+func (repository AppAuthDeviceRequestsRepository) Increment(key AppAuthDeviceRequestsPrimaryKey, amounts AppAuthDeviceRequestsIncrement) (AppAuthDeviceRequestsRow, error) {
+	values := map[string]int32{}
+	row, err := repository.repository.Increment(map[string]any{"id": key.ID}, values)
+	if err != nil {
+		return AppAuthDeviceRequestsRow{}, err
+	}
+	return orm.DecodeRow[AppAuthDeviceRequestsRow](row, appAuthDeviceRequestsTable)
+}
+
+// IncrementIf atomically increments and patches disjoint columns, or returns nil when unmatched.
+func (repository AppAuthDeviceRequestsRepository) IncrementIf(key AppAuthDeviceRequestsPrimaryKey, condition orm.Filter, amounts AppAuthDeviceRequestsIncrement, patch AppAuthDeviceRequestsUpdate) (*AppAuthDeviceRequestsRow, error) {
+	increments := map[string]int32{}
+	values := map[string]any{}
+	if patch.ApprovedAt.Set {
+		if patch.ApprovedAt.Null {
+			values["approved_at"] = nil
+		} else {
+			values["approved_at"] = patch.ApprovedAt.Value
+		}
+	}
+	if patch.ConsumedAt.Set {
+		if patch.ConsumedAt.Null {
+			values["consumed_at"] = nil
+		} else {
+			values["consumed_at"] = patch.ConsumedAt.Value
+		}
+	}
+	if patch.CreatedAt.Set {
+		if patch.CreatedAt.Null {
+			values["created_at"] = nil
+		} else {
+			values["created_at"] = patch.CreatedAt.Value
+		}
+	}
+	if patch.DeviceCodeHash.Set {
+		if patch.DeviceCodeHash.Null {
+			values["device_code_hash"] = nil
+		} else {
+			values["device_code_hash"] = patch.DeviceCodeHash.Value
+		}
+	}
+	if patch.DeviceName.Set {
+		if patch.DeviceName.Null {
+			values["device_name"] = nil
+		} else {
+			values["device_name"] = patch.DeviceName.Value
+		}
+	}
+	if patch.ExpiresAt.Set {
+		if patch.ExpiresAt.Null {
+			values["expires_at"] = nil
+		} else {
+			values["expires_at"] = patch.ExpiresAt.Value
+		}
+	}
+	if patch.LastPolledAt.Set {
+		if patch.LastPolledAt.Null {
+			values["last_polled_at"] = nil
+		} else {
+			values["last_polled_at"] = patch.LastPolledAt.Value
+		}
+	}
+	if patch.Status.Set {
+		if patch.Status.Null {
+			values["status"] = nil
+		} else {
+			values["status"] = patch.Status.Value
+		}
+	}
+	if patch.UserCodeHash.Set {
+		if patch.UserCodeHash.Null {
+			values["user_code_hash"] = nil
+		} else {
+			values["user_code_hash"] = patch.UserCodeHash.Value
+		}
+	}
+	if patch.UserID.Set {
+		if patch.UserID.Null {
+			values["user_id"] = nil
+		} else {
+			values["user_id"] = patch.UserID.Value
+		}
+	}
+	row, err := repository.repository.IncrementIf(map[string]any{"id": key.ID}, condition, increments, values)
+	if err != nil || row == nil {
+		return nil, err
+	}
+	value, err := orm.DecodeRow[AppAuthDeviceRequestsRow](row, appAuthDeviceRequestsTable)
+	if err != nil {
+		return nil, err
+	}
+	return &value, nil
+}
+
+// Delete returns the deleted row, or nil when no row matches the complete primary key.
+func (repository AppAuthDeviceRequestsRepository) Delete(key AppAuthDeviceRequestsPrimaryKey) (*AppAuthDeviceRequestsRow, error) {
+	row, err := repository.repository.Delete(map[string]any{"id": key.ID})
+	if err != nil || row == nil {
+		return nil, err
+	}
+	value, err := orm.DecodeRow[AppAuthDeviceRequestsRow](row, appAuthDeviceRequestsTable)
 	if err != nil {
 		return nil, err
 	}
