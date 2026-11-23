@@ -34,6 +34,35 @@ func NewOperationError(code string, status int, message *string, fields []FieldE
 	return &OperationError{Code: code, Status: status, Message: message, Fields: fields}
 }
 
+// BEGIN generated operation errors
+
+// NotFound creates the not_found operation error.
+func NotFound() *OperationError {
+	return &OperationError{Code: "not_found", Status: 404}
+}
+
+// InvalidInput creates the invalid_input operation error.
+func InvalidInput() *OperationError {
+	return &OperationError{Code: "invalid_input", Status: 400}
+}
+
+// Conflict creates the conflict operation error.
+func Conflict() *OperationError {
+	return &OperationError{Code: "conflict", Status: 409}
+}
+
+// Forbidden creates the forbidden operation error.
+func Forbidden() *OperationError {
+	return &OperationError{Code: "forbidden", Status: 403}
+}
+
+// NotImplemented creates the not_implemented operation error.
+func NotImplemented() *OperationError {
+	return &OperationError{Code: "not_implemented", Status: 501}
+}
+
+// END generated operation errors
+
 // Error returns the operation code without adding response details.
 func (err *OperationError) Error() string { return err.Code }
 

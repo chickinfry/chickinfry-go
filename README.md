@@ -133,13 +133,15 @@ before initialization or dispatch. Existing `Register(handler)` entries continue
 to work without a startup callback. Registration is not a hot-swap API, and
 `Handle` retains its request-owned buffer contract.
 
-Operations can return `server.ErrNotImplemented`, including through error wrapping,
-for HTTP 501 with `{"error":"not_implemented"}`. Unexpected errors and all panics
+Operations can return `server.NotImplemented()` for HTTP 501 with
+`{"error":"not_implemented"}`. The existing `server.ErrNotImplemented` also works,
+including through error wrapping. Unexpected errors and all panics
 remain sanitized HTTP 500 failures. Startup failures always return 500, even if
 the callback returns `ErrNotImplemented`.
 
-Return `&server.OperationError{Code: "conflict", Status: 409}` for an explicit
-operation failure. Dispatch validates the mutable value before sending it;
+Use `server.NotFound()`, `server.InvalidInput()`, `server.Conflict()`, or
+`server.Forbidden()` for common operation failures. For a custom failure, return
+`&server.OperationError{Code: "out_of_stock", Status: 409}`. Dispatch validates the mutable value before sending it;
 statuses outside 400 through 599 or an empty code become `operation_failed`/500.
 Its `Error()` method returns only the code. The server type is distinct from the
 client runtime's received `OperationError`; remote errors are not trusted as
